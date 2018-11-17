@@ -18,6 +18,7 @@ pub fn pair() -> Result<(PollEvented2<EventedFile>, PollEvented2<EventedFile>)> 
     // open flags for master
     oflags.insert(OFlag::O_RDWR);
     oflags.insert(OFlag::O_NONBLOCK);
+    oflags.insert(OFlag::O_CLOEXEC);
 
     // open master pty
     let pty_master = pty::posix_openpt(oflags)?;
