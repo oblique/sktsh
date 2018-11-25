@@ -2,8 +2,6 @@ use std::io;
 use std::os::unix::io::IntoRawFd;
 use std::ffi::CString;
 
-use error_chain::ChainedError;
-
 use futures::prelude::*;
 use tokio::prelude::*;
 use tokio::reactor::PollEvented2;
@@ -15,9 +13,12 @@ use nix::unistd::{
 use nix::sys::signal::{kill, Signal};
 use nix::sys::wait::waitpid;
 
+use failure::Error;
+use failure::Fail;
+use failure::ResultExt;
+
 use pty;
 use evented_file::EventedFile;
-use errors::*;
 
 pub struct TtyServer {
     master: PollEvented2<EventedFile>,
@@ -25,7 +26,7 @@ pub struct TtyServer {
 }
 
 impl TtyServer {
-    pub fn new() -> Result<Self> {
+    pub fn new() -> Result<Self, Error> {
         let child_pid;
         let (master, slave) = pty::pair().unwrap();
 
@@ -39,19 +40,19 @@ impl TtyServer {
             Ok(ForkResult::Child) => {
                 let slave_fd = slave.into_raw_fd();
 
-                let redirect_and_exec = || -> Result<()> {
+                let redirect_and_exec = || -> Result<(), Error> {
                     // redirect stdin/stdout/stderr to slave FD
-                    dup2(slave_fd, 0).chain_err(|| "dup2(0) failed")?;
-                    dup2(slave_fd, 1).chain_err(|| "dup2(1) failed")?;
-                    dup2(slave_fd, 2).chain_err(|| "dup2(2) failed")?;
+                    dup2(slave_fd, 0).context("dup2(0) failed")?;
+                    dup2(slave_fd, 1).context("dup2(1) failed")?;
+                    dup2(slave_fd, 2).context("dup2(2) failed")?;
 
                     // create new process group
-                    setsid().chain_err(|| "setsid failed")?;
+                    setsid().context("setsid failed")?;
 
                     // exec
                     let file = CString::new("bash").unwrap();
                     let args = [ file.clone(), ];
-                    execvp(&file, &args).chain_err(|| "Exec failed")?;
+                    execvp(&file, &args).context("Exec failed")?;
 
                     unreachable!();
                 };
@@ -59,10 +60,13 @@ impl TtyServer {
                 let err = redirect_and_exec().unwrap_err();
                 // we reach this point only if redirection or exec failed.
                 // we must exit with error since we are the child.
-                eprintln!("{}", err.display_chain());
+                eprintln!("Error: {}", err);
+                for c in err.iter_causes() {
+                    eprintln!("Caused by: {}", c);
+                }
                 std::process::exit(1);
             }
-            Err(e) => return Err(e).chain_err(|| "Fork failed"),
+            Err(e) => return Err(e.context("Fork failed").into()),
         }
 
         Ok(TtyServer {

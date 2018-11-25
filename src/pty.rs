@@ -9,10 +9,11 @@ use nix::pty;
 
 use libc;
 
-use evented_file::EventedFile;
-use errors::*;
+use failure::Error;
 
-pub fn pair() -> Result<(PollEvented2<EventedFile>, PollEvented2<EventedFile>)> {
+use evented_file::EventedFile;
+
+pub fn pair() -> Result<(PollEvented2<EventedFile>, PollEvented2<EventedFile>), Error> {
     let mut oflags = OFlag::empty();
 
     // open flags for master

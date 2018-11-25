@@ -1,6 +1,5 @@
 #![recursion_limit="1024"]
-#[macro_use]
-extern crate error_chain;
+extern crate failure;
 #[macro_use]
 extern crate clap;
 extern crate futures;
@@ -11,23 +10,14 @@ extern crate nix;
 extern crate libc;
 extern crate bytes;
 
-use error_chain::ChainedError;
 use clap::{App, AppSettings, Arg, ArgMatches, SubCommand};
 
 use tokio::prelude::*;
 use tokio::runtime::Runtime;
 use tokio::net::UnixListener;
 
-mod errors {
-    error_chain! {
-        foreign_links {
-            Io(std::io::Error);
-            Nix(nix::Error);
-        }
-    }
-}
-
-use errors::*;
+use failure::Error;
+use failure::ResultExt;
 
 mod tty_server;
 use tty_server::TtyServer;
@@ -38,14 +28,14 @@ use forwarder::Forwarder;
 mod pty;
 mod evented_file;
 
-fn cmd_listen(matches: &ArgMatches) -> Result<()> {
+fn cmd_listen(matches: &ArgMatches) -> Result<(), Error> {
     let path = matches.value_of("path").unwrap();
 
     let mut runtime = Runtime::new().unwrap();
     let executor = runtime.executor();
 
     let listener = UnixListener::bind(path)
-        .chain_err(|| format!("Unable to bind UNIX socket: {}", path))?;
+        .context(format!("Unable to bind UNIX socket: {}", path))?;
 
     let server = listener.incoming().for_each(move |socket| {
         println!("New connection: {:?}", socket.peer_addr().unwrap());
@@ -92,7 +82,7 @@ fn cmd_listen(matches: &ArgMatches) -> Result<()> {
     Ok(())
 }
 
-fn run() -> Result<()> {
+fn run() -> Result<(), Error> {
     let app_m = App::new(crate_name!())
         .version(crate_version!())
         .author(crate_authors!())
@@ -116,7 +106,10 @@ fn run() -> Result<()> {
 
 fn main() {
     if let Err(ref e) = run() {
-        eprintln!("{}", e.display_chain());
+        eprintln!("Error: {}", e);
+        for c in e.iter_causes() {
+            eprintln!("Caused by: {}", c);
+        }
         std::process::exit(1);
     }
 }
