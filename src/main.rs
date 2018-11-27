@@ -19,8 +19,8 @@ use tokio::net::UnixListener;
 use failure::Error;
 use failure::ResultExt;
 
-mod tty_server;
-use tty_server::TtyServer;
+mod pty_process;
+use pty_process::PtyProcess;
 
 mod forwarder;
 use forwarder::Forwarder;
@@ -40,17 +40,17 @@ fn cmd_listen(matches: &ArgMatches) -> Result<(), Error> {
     let server = listener.incoming().for_each(move |socket| {
         println!("New connection: {:?}", socket.peer_addr().unwrap());
 
-        let tty_server = TtyServer::new().unwrap();
-        let (tty_server_read, tty_server_write) = tty_server.split();
+        let pty_process = PtyProcess::new().unwrap();
+        let (pty_process_read, pty_process_write) = pty_process.split();
         let (socket_read, socket_write) = socket.split();
 
-        let to_socket = Forwarder::new(tty_server_read, socket_write)
+        let to_socket = Forwarder::new(pty_process_read, socket_write)
             .map_err(|err| println!("socket: error: {}", err));
 
-        let to_tty_server = Forwarder::new(socket_read, tty_server_write)
-            .map_err(|err| println!("tty_server: error: {}", err));
+        let to_pty_process = Forwarder::new(socket_read, pty_process_write)
+            .map_err(|err| println!("pty_process: error: {}", err));
 
-        let fut = to_socket.select(to_tty_server)
+        let fut = to_socket.select(to_pty_process)
             .map(|_| ())
             .map_err(|_| ());
 

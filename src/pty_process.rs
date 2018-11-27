@@ -20,12 +20,12 @@ use failure::ResultExt;
 use pty;
 use evented_file::EventedFile;
 
-pub struct TtyServer {
+pub struct PtyProcess {
     master: PollEvented2<EventedFile>,
     child: Pid,
 }
 
-impl TtyServer {
+impl PtyProcess {
     pub fn new() -> Result<Self, Error> {
         let child_pid;
         let (master, slave) = pty::pair().unwrap();
@@ -69,14 +69,14 @@ impl TtyServer {
             Err(e) => return Err(e.context("Fork failed").into()),
         }
 
-        Ok(TtyServer {
+        Ok(PtyProcess {
             master: master,
             child: child_pid,
         })
     }
 }
 
-impl Drop for TtyServer {
+impl Drop for PtyProcess {
     fn drop(&mut self) {
         // TODO: use SIGTERM and try waitpid for 10 seconds, then issue SIGKILL
         let _ = kill(self.child, Signal::SIGKILL);
@@ -84,7 +84,7 @@ impl Drop for TtyServer {
     }
 }
 
-impl Write for TtyServer {
+impl Write for PtyProcess {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.master.write(buf)
     }
@@ -94,17 +94,17 @@ impl Write for TtyServer {
     }
 }
 
-impl AsyncWrite for TtyServer {
+impl AsyncWrite for PtyProcess {
     fn shutdown(&mut self) -> io::Result<Async<()>> {
         self.master.shutdown()
     }
 }
 
-impl Read for TtyServer {
+impl Read for PtyProcess {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         self.master.read(buf)
     }
 }
 
-impl AsyncRead for TtyServer {
+impl AsyncRead for PtyProcess {
 }
