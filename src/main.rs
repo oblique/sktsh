@@ -112,8 +112,8 @@ fn cmd_connect(matches: &ArgMatches) -> Result<(), Error> {
 
     let main_fut = UnixStream::connect(&path)
         .map_err(move |e| e.context(format!("Failed to connect to: {}", path)).into())
-        .and_then(|stream| -> Box<dyn Future<Item = (), Error = Error> + Send> {
-            let (stream_read, stream_write) = stream.split();
+        .and_then(|socket| -> Box<dyn Future<Item = (), Error = Error> + Send> {
+            let (socket_read, socket_write) = socket.split();
             let (term_read, term_write) = match raw_term::pair() {
                 Ok(v) => v,
                 Err(e) => {
@@ -122,13 +122,13 @@ fn cmd_connect(matches: &ArgMatches) -> Result<(), Error> {
                 }
             };
 
-            let to_term = Forwarder::new(stream_read, term_write)
-                .map_err(|e| e.context("Failed to forward from stream to terminal").into());
+            let to_term = Forwarder::new(socket_read, term_write)
+                .map_err(|e| e.context("Failed to forward from socket to terminal").into());
 
-            let to_stream = Forwarder::new(term_read, stream_write)
-                .map_err(|e| e.context("Failed to forward from terminal to stream").into());
+            let to_socket = Forwarder::new(term_read, socket_write)
+                .map_err(|e| e.context("Failed to forward from terminal to socket").into());
 
-            let fut = to_term.select(to_stream)
+            let fut = to_term.select(to_socket)
                 .map(|_| ())
                 .map_err(|(e, _): (failure::Error, _)| e);
 
