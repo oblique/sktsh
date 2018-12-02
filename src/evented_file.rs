@@ -76,6 +76,15 @@ where
     }
 }
 
+impl<T> AsRawFd for EventedIo<T>
+where
+    T: io::Read + io::Write + AsRawFd + IntoRawFd,
+{
+    fn as_raw_fd(&self) -> RawFd {
+        self.inner.as_raw_fd()
+    }
+}
+
 
 pub type EventedFile = EventedIo<File>;
 

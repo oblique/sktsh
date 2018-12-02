@@ -12,12 +12,13 @@ extern crate bytes;
 
 use clap::{App, AppSettings, Arg, ArgMatches, SubCommand};
 
+use futures::prelude::*;
+use futures::future;
 use tokio::prelude::*;
 use tokio::runtime::Runtime;
-use tokio::net::UnixListener;
+use tokio::net::{UnixListener, UnixStream};
 
-use failure::Error;
-use failure::ResultExt;
+use failure::{Fail, Error, ResultExt};
 
 mod pty_process;
 use pty_process::PtyProcess;
@@ -26,6 +27,7 @@ mod forwarder;
 use forwarder::Forwarder;
 
 mod pty;
+mod raw_term;
 mod evented_file;
 
 fn cmd_listen(matches: &ArgMatches) -> Result<(), Error> {
@@ -82,6 +84,39 @@ fn cmd_listen(matches: &ArgMatches) -> Result<(), Error> {
     Ok(())
 }
 
+fn cmd_connect(matches: &ArgMatches) -> Result<(), Error> {
+    let path = matches.value_of("path").unwrap().to_owned();
+    let mut runtime = Runtime::new().unwrap();
+
+    let main_fut = UnixStream::connect(&path)
+        .map_err(move |e| e.context(format!("Failed to connect to: {}", path)).into())
+        .and_then(|stream| -> Box<dyn Future<Item = (), Error = Error> + Send> {
+            let (stream_read, stream_write) = stream.split();
+            let (term_read, term_write) = match raw_term::pair() {
+                Ok(v) => v,
+                Err(e) => {
+                    let e = e.context("Failed to initialize raw terminal");
+                    return Box::new(future::err(e.into()));
+                }
+            };
+
+            let to_term = Forwarder::new(stream_read, term_write)
+                .map_err(|e| e.context("Failed to forward from stream to terminal").into());
+
+            let to_stream = Forwarder::new(term_read, stream_write)
+                .map_err(|e| e.context("Failed to forward from terminal to stream").into());
+
+            let fut = to_term.select(to_stream)
+                .map(|_| ())
+                .map_err(|(e, _): (failure::Error, _)| e);
+
+            Box::new(fut)
+        });
+
+    runtime.block_on(main_fut)?;
+    Ok(())
+}
+
 fn run() -> Result<(), Error> {
     let app_m = App::new(crate_name!())
         .version(crate_version!())
@@ -91,13 +126,20 @@ fn run() -> Result<(), Error> {
                     .arg(Arg::with_name("path")
                          .takes_value(true)
                          .required(true)
-                         .help("UNIX Socket path"))
+                         .help("UNIX socket path"))
                     .about("Starts server for listening"))
+        .subcommand(SubCommand::with_name("connect")
+                    .arg(Arg::with_name("path")
+                         .takes_value(true)
+                         .required(true)
+                         .help("UNIX socket path"))
+                    .about("Connect to server"))
         .get_matches();
 
     let res =
         match app_m.subcommand() {
             ("listen", Some(sub_m)) => cmd_listen(sub_m),
+            ("connect", Some(sub_m)) => cmd_connect(sub_m),
             _ => Ok(()),
         };
 
