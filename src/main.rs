@@ -67,10 +67,14 @@ fn cmd_listen(matches: &ArgMatches) -> Result<(), Error> {
             let (socket_read, socket_write) = socket.split();
 
             let to_socket = Forwarder::new(pty_process_read, socket_write)
-                .map_err(|e| e.context("Failed to forward from pty to socket").into());
+                .map_err(|e| e
+                         .context("Failed to forward data from pty to socket")
+                         .into());
 
             let to_pty_process = Forwarder::new(socket_read, pty_process_write)
-                .map_err(|e| e.context("Failed to forward from socket to stream").into());
+                .map_err(|e| e
+                         .context("Failed to forward data from socket to stream")
+                         .into());
 
             let fut = to_socket.select(to_pty_process)
                 .map(|_| ())
@@ -123,10 +127,14 @@ fn cmd_connect(matches: &ArgMatches) -> Result<(), Error> {
             };
 
             let to_term = Forwarder::new(socket_read, term_write)
-                .map_err(|e| e.context("Failed to forward from socket to terminal").into());
+                .map_err(|e| e
+                         .context("Failed to forward data from socket to terminal")
+                         .into());
 
             let to_socket = Forwarder::new(term_read, socket_write)
-                .map_err(|e| e.context("Failed to forward from terminal to socket").into());
+                .map_err(|e| e
+                         .context("Failed to forward from terminal to socket")
+                         .into());
 
             let fut = to_term.select(to_socket)
                 .map(|_| ())
