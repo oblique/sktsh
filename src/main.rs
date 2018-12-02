@@ -30,57 +30,79 @@ mod pty;
 mod raw_term;
 mod evented_file;
 
+fn display_error(err: &Error) {
+    eprintln!("Error: {}", err);
+    for cause in err.iter_causes() {
+        eprintln!("Caused by: {}", cause);
+    }
+}
+
 fn cmd_listen(matches: &ArgMatches) -> Result<(), Error> {
-    let path = matches.value_of("path").unwrap();
+    let path = matches.value_of("path").unwrap().to_owned();
 
     let mut runtime = Runtime::new().unwrap();
     let executor = runtime.executor();
 
-    let listener = UnixListener::bind(path)
+    let listener = UnixListener::bind(&path)
         .context(format!("Unable to bind UNIX socket: {}", path))?;
 
-    let server = listener.incoming().for_each(move |socket| {
-        println!("New connection: {:?}", socket.peer_addr().unwrap());
+    let path_clone = path.clone();
+    let server = listener.incoming()
+        .map_err(|e| Error::from_boxed_compat(Box::new(e)))
+        .for_each(move |socket| {
+            println!("New connection: {:?}", socket.peer_addr().unwrap());
 
-        let pty_process = PtyProcess::new().unwrap();
-        let (pty_process_read, pty_process_write) = pty_process.split();
-        let (socket_read, socket_write) = socket.split();
+            let pty_process = match PtyProcess::new() {
+                Ok(v) => v,
+                Err(e) => {
+                    let e = e.context("Failed to start pty process").into();
+                    // PtyProcess failure is not fatal to the server so we just log
+                    // it and close the connection by returning Ok.
+                    display_error(&e);
+                    return Ok(());
+                }
+            };
 
-        let to_socket = Forwarder::new(pty_process_read, socket_write)
-            .map_err(|err| println!("socket: error: {}", err));
+            let (pty_process_read, pty_process_write) = pty_process.split();
+            let (socket_read, socket_write) = socket.split();
 
-        let to_pty_process = Forwarder::new(socket_read, pty_process_write)
-            .map_err(|err| println!("pty_process: error: {}", err));
+            let to_socket = Forwarder::new(pty_process_read, socket_write)
+                .map_err(|e| e.context("Failed to forward from pty to socket").into());
 
-        let fut = to_socket.select(to_pty_process)
-            .map(|_| ())
-            .map_err(|_| ());
+            let to_pty_process = Forwarder::new(socket_read, pty_process_write)
+                .map_err(|e| e.context("Failed to forward from socket to stream").into());
 
-        executor.spawn(fut);
-        Ok(())
-    })
-    .map_err(|err| {
-        println!("Listening error: {}", err);
-    });
+            let fut = to_socket.select(to_pty_process)
+                .map(|_| ())
+                .map_err(|(e, _): (failure::Error, _)| display_error(&e));
+
+            executor.spawn(fut);
+            Ok(())
+        })
+        .map_err(move |e| {
+            e.context(format!("Failed to listen to: {}", path_clone)).into()
+        });
 
     let ctrl_c = tokio_signal::ctrl_c().flatten_stream()
         .take(1).for_each(|_| Ok(()))
-        .map_err(|err| println!("SIGINT handler error: {}", err));
+        .map_err(|e| e.context("SIGINT handler failed").into());
 
     let main_fut = server.select(ctrl_c)
         .map(|_| ())
-        .map_err(|_| ());
+        .map_err(|(e, _): (failure::Error, _)| e);
 
     println!("server listening at {}", path);
-    let _ = runtime.block_on(main_fut);
+    let res = runtime.block_on(main_fut);
 
     // ctrl+c pressed, cleaning up
     println!("\nCleaning up");
 
-    if let Err(_) = std::fs::remove_file(path) {
-        println!("Failed to remove: {}", path);
+    if let Err(e) = std::fs::remove_file(&path) {
+        let e = e.context(format!("Failed to remove: {}", path)).into();
+        display_error(&e);
     }
 
+    res.context("Server failure")?;
     Ok(())
 }
 
@@ -148,10 +170,7 @@ fn run() -> Result<(), Error> {
 
 fn main() {
     if let Err(ref e) = run() {
-        eprintln!("Error: {}", e);
-        for c in e.iter_causes() {
-            eprintln!("Caused by: {}", c);
-        }
+        display_error(e);
         std::process::exit(1);
     }
 }
