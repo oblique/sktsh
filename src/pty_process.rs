@@ -17,8 +17,8 @@ use failure::Error;
 use failure::Fail;
 use failure::ResultExt;
 
-use pty;
-use evented_file::EventedFile;
+use crate::pty;
+use crate::evented_file::EventedFile;
 
 pub struct PtyProcess {
     master: PollEvented2<EventedFile>,

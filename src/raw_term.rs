@@ -13,7 +13,7 @@ use futures::prelude::*;
 use tokio::prelude::*;
 use tokio::reactor::PollEvented2;
 
-use evented_file::EventedFile;
+use crate::evented_file::EventedFile;
 
 fn dup_nonblock(fd: RawFd) -> Result<RawFd, failure::Error> {
     // Note: Since `dup` returns `RawFd`, we need to manually `close` it

@@ -11,7 +11,7 @@ use libc;
 
 use failure::Error;
 
-use evented_file::EventedFile;
+use crate::evented_file::EventedFile;
 
 pub fn pair() -> Result<(PollEvented2<EventedFile>, PollEvented2<EventedFile>), Error> {
     let mut oflags = OFlag::empty();

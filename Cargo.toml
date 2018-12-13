@@ -2,6 +2,7 @@
 name = "sktsh"
 version = "0.0.0"
 authors = ["oblique <psyberbits@gmail.com>"]
+edition = "2018"
 license = "MIT"
 
 [dependencies]

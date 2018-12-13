@@ -1,15 +1,3 @@
-#![recursion_limit="1024"]
-extern crate failure;
-#[macro_use]
-extern crate clap;
-extern crate futures;
-extern crate tokio;
-extern crate tokio_signal;
-extern crate mio;
-extern crate nix;
-extern crate libc;
-extern crate bytes;
-
 use clap::{App, AppSettings, Arg, ArgMatches, SubCommand};
 
 use futures::prelude::*;
@@ -21,10 +9,10 @@ use tokio::net::{UnixListener, UnixStream};
 use failure::{Fail, Error, ResultExt};
 
 mod pty_process;
-use pty_process::PtyProcess;
+use crate::pty_process::PtyProcess;
 
 mod forwarder;
-use forwarder::Forwarder;
+use crate::forwarder::Forwarder;
 
 mod pty;
 mod raw_term;
@@ -148,9 +136,9 @@ fn cmd_connect(matches: &ArgMatches) -> Result<(), Error> {
 }
 
 fn run() -> Result<(), Error> {
-    let app_m = App::new(crate_name!())
-        .version(crate_version!())
-        .author(crate_authors!())
+    let app_m = App::new(clap::crate_name!())
+        .version(clap::crate_version!())
+        .author(clap::crate_authors!())
         .setting(AppSettings::ArgRequiredElseHelp)
         .subcommand(SubCommand::with_name("listen")
                     .arg(Arg::with_name("path")
