@@ -69,7 +69,7 @@ impl PtyProcess {
         }
 
         Ok(PtyProcess {
-            master: master,
+            master,
             child: child_pid,
         })
     }

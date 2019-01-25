@@ -15,7 +15,7 @@ where
 {
     pub fn new(inner: T) -> Self {
         EventedIo {
-            inner: inner,
+            inner,
         }
     }
 

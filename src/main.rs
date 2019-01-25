@@ -163,13 +163,11 @@ fn run() -> Result<(), Error> {
         )
         .get_matches();
 
-    let res = match app_m.subcommand() {
+    match app_m.subcommand() {
         ("listen", Some(sub_m)) => cmd_listen(sub_m),
         ("connect", Some(sub_m)) => cmd_connect(sub_m),
         _ => Ok(()),
-    };
-
-    res
+    }
 }
 
 fn main() {

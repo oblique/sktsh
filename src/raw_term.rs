@@ -60,7 +60,7 @@ impl RawTermRead {
         });
 
         Ok(RawTermRead {
-            stdin: stdin,
+            stdin,
         })
     }
 }
@@ -89,7 +89,7 @@ impl RawTermWrite {
 
         Ok(RawTermWrite {
             prev_attrs: attrs,
-            stdout: stdout,
+            stdout,
         })
     }
 }

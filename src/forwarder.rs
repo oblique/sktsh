@@ -17,8 +17,8 @@ where
 {
     pub fn new(from: F, to: T) -> Self {
         Forwarder {
-            from: from,
-            to: to,
+            from,
+            to,
             buffer: BytesMut::new(),
         }
     }
@@ -43,7 +43,7 @@ where
                     // in this case we need to return Async::Ready after we write
                     // the buffer the write end.
                     read_closed = true;
-                    if self.buffer.len() > 0 {
+                    if self.buffer.is_empty() {
                         break;
                     }
                     return Ok(Async::Ready(()));
@@ -54,7 +54,7 @@ where
         }
 
         while !self.buffer.is_empty() {
-            match self.to.poll_write(&mut self.buffer)? {
+            match self.to.poll_write(&self.buffer)? {
                 Async::Ready(0) => {
                     // write end closed
                     return Ok(Async::Ready(()));
@@ -67,9 +67,10 @@ where
             }
         }
 
-        match read_closed {
-            true => Ok(Async::Ready(())),
-            false => Ok(Async::NotReady),
+        if read_closed {
+            Ok(Async::Ready(()))
+        } else {
+            Ok(Async::NotReady)
         }
     }
 }
