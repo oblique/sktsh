@@ -1,12 +1,12 @@
 use clap::{App, AppSettings, Arg, ArgMatches, SubCommand};
 
-use futures::prelude::*;
 use futures::future;
+use futures::prelude::*;
+use tokio::net::{UnixListener, UnixStream};
 use tokio::prelude::*;
 use tokio::runtime::Runtime;
-use tokio::net::{UnixListener, UnixStream};
 
-use failure::{Fail, Error, ResultExt};
+use failure::{Error, Fail, ResultExt};
 
 mod pty_process;
 use crate::pty_process::PtyProcess;
@@ -14,9 +14,9 @@ use crate::pty_process::PtyProcess;
 mod forwarder;
 use crate::forwarder::Forwarder;
 
+mod evented_file;
 mod pty;
 mod raw_term;
-mod evented_file;
 
 fn display_error(err: &Error) {
     eprintln!("Error: {}", err);
@@ -35,7 +35,8 @@ fn cmd_listen(matches: &ArgMatches) -> Result<(), Error> {
         .context(format!("Unable to bind UNIX socket: {}", path))?;
 
     let path_clone = path.clone();
-    let server = listener.incoming()
+    let server = listener
+        .incoming()
         .map_err(|e| Error::from_boxed_compat(Box::new(e)))
         .for_each(move |socket| {
             println!("New connection: {:?}", socket.peer_addr().unwrap());
@@ -54,17 +55,17 @@ fn cmd_listen(matches: &ArgMatches) -> Result<(), Error> {
             let (pty_process_read, pty_process_write) = pty_process.split();
             let (socket_read, socket_write) = socket.split();
 
-            let to_socket = Forwarder::new(pty_process_read, socket_write)
-                .map_err(|e| e
-                         .context("Failed to forward data from pty to socket")
-                         .into());
+            let to_socket = Forwarder::new(pty_process_read, socket_write).map_err(|e| {
+                e.context("Failed to forward data from pty to socket").into()
+            });
 
-            let to_pty_process = Forwarder::new(socket_read, pty_process_write)
-                .map_err(|e| e
-                         .context("Failed to forward data from socket to stream")
-                         .into());
+            let to_pty_process =
+                Forwarder::new(socket_read, pty_process_write).map_err(|e| {
+                    e.context("Failed to forward data from socket to stream").into()
+                });
 
-            let fut = to_socket.select(to_pty_process)
+            let fut = to_socket
+                .select(to_pty_process)
                 .map(|_| ())
                 .map_err(|(e, _): (failure::Error, _)| display_error(&e));
 
@@ -75,13 +76,14 @@ fn cmd_listen(matches: &ArgMatches) -> Result<(), Error> {
             e.context(format!("Failed to listen to: {}", path_clone)).into()
         });
 
-    let ctrl_c = tokio_signal::ctrl_c().flatten_stream()
-        .take(1).for_each(|_| Ok(()))
+    let ctrl_c = tokio_signal::ctrl_c()
+        .flatten_stream()
+        .take(1)
+        .for_each(|_| Ok(()))
         .map_err(|e| e.context("SIGINT handler failed").into());
 
-    let main_fut = server.select(ctrl_c)
-        .map(|_| ())
-        .map_err(|(e, _): (failure::Error, _)| e);
+    let main_fut =
+        server.select(ctrl_c).map(|_| ()).map_err(|(e, _): (failure::Error, _)| e);
 
     println!("server listening at {}", path);
     let res = runtime.block_on(main_fut);
@@ -114,17 +116,16 @@ fn cmd_connect(matches: &ArgMatches) -> Result<(), Error> {
                 }
             };
 
-            let to_term = Forwarder::new(socket_read, term_write)
-                .map_err(|e| e
-                         .context("Failed to forward data from socket to terminal")
-                         .into());
+            let to_term = Forwarder::new(socket_read, term_write).map_err(|e| {
+                e.context("Failed to forward data from socket to terminal").into()
+            });
 
-            let to_socket = Forwarder::new(term_read, socket_write)
-                .map_err(|e| e
-                         .context("Failed to forward from terminal to socket")
-                         .into());
+            let to_socket = Forwarder::new(term_read, socket_write).map_err(|e| {
+                e.context("Failed to forward from terminal to socket").into()
+            });
 
-            let fut = to_term.select(to_socket)
+            let fut = to_term
+                .select(to_socket)
                 .map(|_| ())
                 .map_err(|(e, _): (failure::Error, _)| e);
 
@@ -140,26 +141,33 @@ fn run() -> Result<(), Error> {
         .version(clap::crate_version!())
         .author(clap::crate_authors!())
         .setting(AppSettings::ArgRequiredElseHelp)
-        .subcommand(SubCommand::with_name("listen")
-                    .arg(Arg::with_name("path")
-                         .takes_value(true)
-                         .required(true)
-                         .help("UNIX socket path"))
-                    .about("Starts server for listening"))
-        .subcommand(SubCommand::with_name("connect")
-                    .arg(Arg::with_name("path")
-                         .takes_value(true)
-                         .required(true)
-                         .help("UNIX socket path"))
-                    .about("Connect to server"))
+        .subcommand(
+            SubCommand::with_name("listen")
+                .arg(
+                    Arg::with_name("path")
+                        .takes_value(true)
+                        .required(true)
+                        .help("UNIX socket path"),
+                )
+                .about("Starts server for listening"),
+        )
+        .subcommand(
+            SubCommand::with_name("connect")
+                .arg(
+                    Arg::with_name("path")
+                        .takes_value(true)
+                        .required(true)
+                        .help("UNIX socket path"),
+                )
+                .about("Connect to server"),
+        )
         .get_matches();
 
-    let res =
-        match app_m.subcommand() {
-            ("listen", Some(sub_m)) => cmd_listen(sub_m),
-            ("connect", Some(sub_m)) => cmd_connect(sub_m),
-            _ => Ok(()),
-        };
+    let res = match app_m.subcommand() {
+        ("listen", Some(sub_m)) => cmd_listen(sub_m),
+        ("connect", Some(sub_m)) => cmd_connect(sub_m),
+        _ => Ok(()),
+    };
 
     res
 }

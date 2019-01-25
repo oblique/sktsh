@@ -1,9 +1,9 @@
-use std::io;
 use std::fs::File;
-use std::os::unix::io::{RawFd, FromRawFd, IntoRawFd, AsRawFd};
+use std::io;
+use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
 
-use mio::{Evented, Poll, Token, Ready, PollOpt};
 use mio::unix::EventedFd;
+use mio::{Evented, Poll, PollOpt, Ready, Token};
 
 pub struct EventedIo<T> {
     inner: T,
@@ -28,15 +28,23 @@ impl<T> Evented for EventedIo<T>
 where
     T: AsRawFd,
 {
-    fn register(&self, poll: &Poll, token: Token, interest: Ready, opts: PollOpt)
-        -> io::Result<()>
-    {
+    fn register(
+        &self,
+        poll: &Poll,
+        token: Token,
+        interest: Ready,
+        opts: PollOpt,
+    ) -> io::Result<()> {
         EventedFd(&self.inner.as_raw_fd()).register(poll, token, interest, opts)
     }
 
-    fn reregister(&self, poll: &Poll, token: Token, interest: Ready, opts: PollOpt)
-        -> io::Result<()>
-    {
+    fn reregister(
+        &self,
+        poll: &Poll,
+        token: Token,
+        interest: Ready,
+        opts: PollOpt,
+    ) -> io::Result<()> {
         EventedFd(&self.inner.as_raw_fd()).reregister(poll, token, interest, opts)
     }
 
@@ -84,7 +92,6 @@ where
         self.inner.as_raw_fd()
     }
 }
-
 
 pub type EventedFile = EventedIo<File>;
 

@@ -28,14 +28,15 @@ pub fn pair() -> Result<(PollEvented2<EventedFile>, PollEvented2<EventedFile>), 
 
     // open slave pty
     let slave_path = pty::ptsname_r(&pty_master)?;
-    let pty_slave = OpenOptions::new().read(true).write(true)
+    let pty_slave = OpenOptions::new()
+        .read(true)
+        .write(true)
         .custom_flags(libc::O_NONBLOCK)
         .open(slave_path)?;
 
     // get them ready for tokio
-    let pty_master = PollEvented2::new(unsafe {
-        EventedFile::from_raw_fd(pty_master.into_raw_fd())
-    });
+    let pty_master =
+        PollEvented2::new(unsafe { EventedFile::from_raw_fd(pty_master.into_raw_fd()) });
     let pty_slave = PollEvented2::new(EventedFile::new(pty_slave));
 
     Ok((pty_master, pty_slave))

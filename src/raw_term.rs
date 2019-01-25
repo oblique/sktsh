@@ -1,13 +1,13 @@
 use std::io;
-use std::os::unix::io::{RawFd, AsRawFd, FromRawFd};
+use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 
 use failure::Error;
 
-use nix::unistd;
-use nix::fcntl::{fcntl, FcntlArg, OFlag};
-use nix::sys::termios::{tcgetattr, tcsetattr, cfmakeraw};
-use nix::sys::termios::{Termios, SetArg};
 use libc;
+use nix::fcntl::{fcntl, FcntlArg, OFlag};
+use nix::sys::termios::{cfmakeraw, tcgetattr, tcsetattr};
+use nix::sys::termios::{SetArg, Termios};
+use nix::unistd;
 
 use futures::prelude::*;
 use tokio::prelude::*;
@@ -71,8 +71,7 @@ impl Read for RawTermRead {
     }
 }
 
-impl AsyncRead for RawTermRead {
-}
+impl AsyncRead for RawTermRead {}
 
 impl RawTermWrite {
     pub fn new() -> Result<Self, Error> {
@@ -97,8 +96,11 @@ impl RawTermWrite {
 
 impl Drop for RawTermWrite {
     fn drop(&mut self) {
-        let _ = tcsetattr(self.stdout.get_ref().as_raw_fd(),
-                          SetArg::TCSANOW, &self.prev_attrs);
+        let _ = tcsetattr(
+            self.stdout.get_ref().as_raw_fd(),
+            SetArg::TCSANOW,
+            &self.prev_attrs,
+        );
     }
 }
 

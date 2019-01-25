@@ -1,8 +1,8 @@
 use std::io;
 
+use bytes::BytesMut;
 use futures::prelude::*;
 use tokio::prelude::*;
-use bytes::BytesMut;
 
 pub struct Forwarder<F, T> {
     from: F,
@@ -44,7 +44,7 @@ where
                     // the buffer the write end.
                     read_closed = true;
                     if self.buffer.len() > 0 {
-                        break
+                        break;
                     }
                     return Ok(Async::Ready(()));
                 }
@@ -61,7 +61,7 @@ where
                 }
                 Async::Ready(n) => {
                     self.buffer.advance(n);
-                    continue
+                    continue;
                 }
                 _ => break,
             }

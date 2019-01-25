@@ -1,24 +1,21 @@
+use std::ffi::CString;
 use std::io;
 use std::os::unix::io::IntoRawFd;
-use std::ffi::CString;
 
 use futures::prelude::*;
 use tokio::prelude::*;
 use tokio::reactor::PollEvented2;
 
-use nix::unistd::{
-    execvp, fork, setsid, dup2,
-    ForkResult, Pid
-};
 use nix::sys::signal::{kill, Signal};
 use nix::sys::wait::waitpid;
+use nix::unistd::{dup2, execvp, fork, setsid, ForkResult, Pid};
 
 use failure::Error;
 use failure::Fail;
 use failure::ResultExt;
 
-use crate::pty;
 use crate::evented_file::EventedFile;
+use crate::pty;
 
 pub struct PtyProcess {
     master: PollEvented2<EventedFile>,
@@ -34,7 +31,9 @@ impl PtyProcess {
         let slave = slave.into_inner().unwrap();
 
         match fork() {
-            Ok(ForkResult::Parent { child }) => {
+            Ok(ForkResult::Parent {
+                child,
+            }) => {
                 child_pid = child;
             }
             Ok(ForkResult::Child) => {
@@ -51,7 +50,7 @@ impl PtyProcess {
 
                     // exec
                     let file = CString::new("bash").unwrap();
-                    let args = [ file.clone(), ];
+                    let args = [file.clone()];
                     execvp(&file, &args).context("Exec failed")?;
 
                     unreachable!();
@@ -106,5 +105,4 @@ impl Read for PtyProcess {
     }
 }
 
-impl AsyncRead for PtyProcess {
-}
+impl AsyncRead for PtyProcess {}
