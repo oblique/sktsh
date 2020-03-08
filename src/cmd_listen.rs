@@ -19,7 +19,6 @@ pub async fn cmd_listen(path: PathBuf) -> Result<()> {
             if let Err(e) = handle_client(client).await {
                 println!("{:?}", e);
             }
-            println!("Done");
         });
     }
 
