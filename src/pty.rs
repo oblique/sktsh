@@ -1,43 +1,112 @@
-use std::fs::OpenOptions;
-use std::os::unix::fs::OpenOptionsExt;
-use std::os::unix::io::{FromRawFd, IntoRawFd};
+use anyhow::{bail, Result};
+use libc::{dup2, grantpt, ptsname_r, setsid, unlockpt};
+use std::convert::TryFrom;
+use std::ffi::CStr;
+use std::os::unix::io::AsRawFd;
+use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::process::{Child, Command};
+use std::task::{Context, Poll};
+use tokio::fs::{File, OpenOptions};
+use tokio::io::{self, AsyncRead, AsyncWrite};
+use tokio_fd::AsyncFd;
 
-use tokio::reactor::PollEvented2;
+pub async fn spawn_shell() -> Result<(Master, Child)> {
+    let master = OpenOptions::new().read(true).write(true).open("/dev/ptmx").await?;
 
-use nix::fcntl::OFlag;
-use nix::pty;
+    let slave_path: PathBuf = unsafe {
+        let master_fd = master.as_raw_fd();
+        let mut buf = [0i8; 1024];
 
-use libc;
+        let rc = grantpt(master_fd);
+        if rc < 0 {
+            bail!(io::Error::last_os_error());
+        }
 
-use failure::Error;
+        let rc = unlockpt(master_fd);
+        if rc < 0 {
+            bail!(io::Error::last_os_error());
+        }
 
-use crate::evented_file::EventedFile;
+        let rc = ptsname_r(master_fd, buf.as_mut_ptr(), buf.len());
+        if rc < 0 {
+            bail!(io::Error::last_os_error());
+        }
 
-pub fn pair() -> Result<(PollEvented2<EventedFile>, PollEvented2<EventedFile>), Error> {
-    let mut oflags = OFlag::empty();
+        let path = CStr::from_ptr(buf.as_ptr());
+        path.to_str().unwrap().into()
+    };
 
-    // open flags for master
-    oflags.insert(OFlag::O_RDWR);
-    oflags.insert(OFlag::O_NONBLOCK);
-    oflags.insert(OFlag::O_CLOEXEC);
+    let master = Master::new(master)?;
+    let child = slave_spawn_shell(&slave_path).await?;
 
-    // open master pty
-    let pty_master = pty::posix_openpt(oflags)?;
-    pty::grantpt(&pty_master)?;
-    pty::unlockpt(&pty_master)?;
+    Ok((master, child))
+}
 
-    // open slave pty
-    let slave_path = pty::ptsname_r(&pty_master)?;
-    let pty_slave = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .custom_flags(libc::O_NONBLOCK)
-        .open(slave_path)?;
+async fn slave_spawn_shell(slave_path: &Path) -> Result<Child> {
+    let slave = OpenOptions::new().read(true).write(true).open(slave_path).await?;
 
-    // get them ready for tokio
-    let pty_master =
-        PollEvented2::new(unsafe { EventedFile::from_raw_fd(pty_master.into_raw_fd()) });
-    let pty_slave = PollEvented2::new(EventedFile::new(pty_slave));
+    let slave_fd = slave.as_raw_fd();
+    let mut cmd = Command::new("bash");
 
-    Ok((pty_master, pty_slave))
+    unsafe {
+        cmd.pre_exec(move || {
+            dup2(slave_fd, 0);
+            dup2(slave_fd, 1);
+            dup2(slave_fd, 2);
+
+            for fd in 3..=4096 {
+                libc::close(fd);
+            }
+
+            setsid();
+
+            Ok(())
+        });
+    }
+
+    Ok(cmd.spawn()?)
+}
+
+pub struct Master {
+    fd: AsyncFd,
+    _file: File,
+}
+
+impl Master {
+    fn new(file: File) -> Result<Self> {
+        Ok(Master {
+            fd: AsyncFd::try_from(file.as_raw_fd())?,
+            _file: file,
+        })
+    }
+}
+
+impl AsyncRead for Master {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context,
+        buf: &mut [u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.fd).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for Master {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.fd).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.fd).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.fd).poll_shutdown(cx)
+    }
 }

@@ -1,121 +1,85 @@
+use libc::{
+    cfmakeraw, tcgetattr, tcsetattr, termios, STDIN_FILENO, STDOUT_FILENO, TCSANOW,
+};
+use std::convert::TryFrom;
 use std::io;
-use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+use std::mem::MaybeUninit;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio_fd::AsyncFd;
 
-use failure::Error;
-
-use libc;
-use nix::fcntl::{fcntl, FcntlArg, OFlag};
-use nix::sys::termios::{cfmakeraw, tcgetattr, tcsetattr};
-use nix::sys::termios::{SetArg, Termios};
-use nix::unistd;
-
-use futures::prelude::*;
-use tokio::prelude::*;
-use tokio::reactor::PollEvented2;
-
-use crate::evented_file::EventedFile;
-
-fn dup_nonblock(fd: RawFd) -> Result<RawFd, failure::Error> {
-    // Note: Since `dup` returns `RawFd`, we need to manually `close` it
-    // on errors.
-    let fd = unistd::dup(fd)?;
-
-    let mut flags = match fcntl(fd, FcntlArg::F_GETFL) {
-        Ok(flags) => OFlag::from_bits_truncate(flags),
-        Err(e) => {
-            let _ = unistd::close(fd);
-            return Err(e.into());
-        }
-    };
-
-    flags.insert(OFlag::O_NONBLOCK);
-
-    match fcntl(fd, FcntlArg::F_SETFL(flags)) {
-        Ok(_) => Ok(fd),
-        Err(e) => {
-            let _ = unistd::close(fd);
-            Err(e.into())
-        }
-    }
+pub struct RawTerm {
+    stdin: AsyncFd,
+    stdout: AsyncFd,
+    saved_attrs: termios,
 }
 
-pub struct RawTermRead {
-    stdin: PollEvented2<EventedFile>,
-}
+impl RawTerm {
+    pub fn new() -> io::Result<Self> {
+        let stdin = AsyncFd::try_from(STDIN_FILENO)?;
+        let stdout = AsyncFd::try_from(STDOUT_FILENO)?;
 
-pub struct RawTermWrite {
-    prev_attrs: Termios,
-    stdout: PollEvented2<EventedFile>,
-}
+        let saved_attrs = unsafe {
+            let mut saved_attrs = MaybeUninit::<termios>::uninit();
 
-pub fn pair() -> Result<(RawTermRead, RawTermWrite), Error> {
-    Ok((RawTermRead::new()?, RawTermWrite::new()?))
-}
+            let rc = tcgetattr(STDOUT_FILENO, saved_attrs.as_mut_ptr());
+            if rc < 0 {
+                return Err(io::Error::last_os_error());
+            }
 
-impl RawTermRead {
-    pub fn new() -> Result<Self, Error> {
-        let stdin = PollEvented2::new({
-            let fd = dup_nonblock(libc::STDIN_FILENO)?;
-            unsafe { EventedFile::from_raw_fd(fd) }
-        });
+            let saved_attrs = saved_attrs.assume_init();
+            let mut raw_attrs = saved_attrs;
+            cfmakeraw(&mut raw_attrs);
 
-        Ok(RawTermRead {
+            let rc = tcsetattr(STDOUT_FILENO, TCSANOW, &raw_attrs);
+            if rc < 0 {
+                return Err(io::Error::last_os_error());
+            }
+
+            saved_attrs
+        };
+
+        Ok(RawTerm {
             stdin,
-        })
-    }
-}
-
-impl Read for RawTermRead {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        self.stdin.read(buf)
-    }
-}
-
-impl AsyncRead for RawTermRead {}
-
-impl RawTermWrite {
-    pub fn new() -> Result<Self, Error> {
-        let stdout = PollEvented2::new({
-            let fd = dup_nonblock(libc::STDOUT_FILENO)?;
-            unsafe { EventedFile::from_raw_fd(fd) }
-        });
-
-        let attrs = tcgetattr(stdout.get_ref().as_raw_fd())?;
-
-        let mut raw_attrs = attrs.clone();
-        cfmakeraw(&mut raw_attrs);
-
-        tcsetattr(stdout.get_ref().as_raw_fd(), SetArg::TCSANOW, &raw_attrs)?;
-
-        Ok(RawTermWrite {
-            prev_attrs: attrs,
             stdout,
+            saved_attrs,
         })
     }
 }
 
-impl Drop for RawTermWrite {
+impl Drop for RawTerm {
     fn drop(&mut self) {
-        let _ = tcsetattr(
-            self.stdout.get_ref().as_raw_fd(),
-            SetArg::TCSANOW,
-            &self.prev_attrs,
-        );
+        unsafe {
+            let _ = tcsetattr(STDOUT_FILENO, TCSANOW, &self.saved_attrs);
+        }
     }
 }
 
-impl Write for RawTermWrite {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.stdout.write(buf)
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        self.stdout.flush()
+impl AsyncRead for RawTerm {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context,
+        buf: &mut [u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.stdin).poll_read(cx, buf)
     }
 }
 
-impl AsyncWrite for RawTermWrite {
-    fn shutdown(&mut self) -> io::Result<Async<()>> {
-        self.stdout.shutdown()
+impl AsyncWrite for RawTerm {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.stdout).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stdout).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stdout).poll_shutdown(cx)
     }
 }

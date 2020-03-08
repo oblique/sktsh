@@ -1,178 +1,50 @@
-use clap::{App, AppSettings, Arg, ArgMatches, SubCommand};
+#![recursion_limit = "256"]
 
-use futures::future;
-use futures::prelude::*;
-use tokio::net::{UnixListener, UnixStream};
-use tokio::prelude::*;
-use tokio::runtime::Runtime;
+use anyhow::Result;
+use std::path::PathBuf;
+use structopt::StructOpt;
 
-use failure::{Error, Fail, ResultExt};
-
-mod pty_process;
-use crate::pty_process::PtyProcess;
-
-mod forwarder;
-use crate::forwarder::Forwarder;
-
-mod evented_file;
+mod cmd_connect;
+mod cmd_listen;
+mod errors;
 mod pty;
 mod raw_term;
 
-fn display_error(err: &Error) {
-    eprintln!("Error: {}", err);
-    for cause in err.iter_causes() {
-        eprintln!("Caused by: {}", cause);
-    }
+use crate::cmd_connect::cmd_connect;
+use crate::cmd_listen::cmd_listen;
+
+#[derive(Debug, StructOpt)]
+enum Opts {
+    /// Start server
+    Listen {
+        /// Socket path
+        path: PathBuf,
+    },
+
+    /// Connect to server
+    Connect {
+        /// Socket path
+        path: PathBuf,
+    },
 }
 
-fn cmd_listen(matches: &ArgMatches) -> Result<(), Error> {
-    let path = matches.value_of("path").unwrap().to_owned();
+fn main() -> Result<()> {
+    let mut rt =
+        tokio::runtime::Builder::new().threaded_scheduler().enable_all().build().unwrap();
 
-    let mut runtime = Runtime::new().unwrap();
-    let executor = runtime.executor();
+    rt.block_on(async {
+        let opts = Opts::from_args();
 
-    let listener = UnixListener::bind(&path)
-        .context(format!("Unable to bind UNIX socket: {}", path))?;
+        match opts {
+            Opts::Listen {
+                path,
+            } => cmd_listen(path).await?,
 
-    let path_clone = path.clone();
-    let server = listener
-        .incoming()
-        .map_err(|e| Error::from_boxed_compat(Box::new(e)))
-        .for_each(move |socket| {
-            println!("New connection: {:?}", socket.peer_addr().unwrap());
+            Opts::Connect {
+                path,
+            } => cmd_connect(path).await?,
+        }
 
-            let pty_process = match PtyProcess::new() {
-                Ok(v) => v,
-                Err(e) => {
-                    let e = e.context("Failed to start pty process").into();
-                    // PtyProcess failure is not fatal to the server so we just log
-                    // it and close the connection by returning Ok.
-                    display_error(&e);
-                    return Ok(());
-                }
-            };
-
-            let (pty_process_read, pty_process_write) = pty_process.split();
-            let (socket_read, socket_write) = socket.split();
-
-            let to_socket = Forwarder::new(pty_process_read, socket_write).map_err(|e| {
-                e.context("Failed to forward data from pty to socket").into()
-            });
-
-            let to_pty_process =
-                Forwarder::new(socket_read, pty_process_write).map_err(|e| {
-                    e.context("Failed to forward data from socket to stream").into()
-                });
-
-            let fut = to_socket
-                .select(to_pty_process)
-                .map(|_| ())
-                .map_err(|(e, _): (failure::Error, _)| display_error(&e));
-
-            executor.spawn(fut);
-            Ok(())
-        })
-        .map_err(move |e| {
-            e.context(format!("Failed to listen to: {}", path_clone)).into()
-        });
-
-    let ctrl_c = tokio_signal::ctrl_c()
-        .flatten_stream()
-        .take(1)
-        .for_each(|_| Ok(()))
-        .map_err(|e| e.context("SIGINT handler failed").into());
-
-    let main_fut =
-        server.select(ctrl_c).map(|_| ()).map_err(|(e, _): (failure::Error, _)| e);
-
-    println!("server listening at {}", path);
-    let res = runtime.block_on(main_fut);
-
-    // ctrl+c pressed, cleaning up
-    println!("\nCleaning up");
-
-    if let Err(e) = std::fs::remove_file(&path) {
-        let e = e.context(format!("Failed to remove: {}", path)).into();
-        display_error(&e);
-    }
-
-    res.context("Server failure")?;
-    Ok(())
-}
-
-fn cmd_connect(matches: &ArgMatches) -> Result<(), Error> {
-    let path = matches.value_of("path").unwrap().to_owned();
-    let mut runtime = Runtime::new().unwrap();
-
-    let main_fut = UnixStream::connect(&path)
-        .map_err(move |e| e.context(format!("Failed to connect to: {}", path)).into())
-        .and_then(|socket| -> Box<dyn Future<Item = (), Error = Error> + Send> {
-            let (socket_read, socket_write) = socket.split();
-            let (term_read, term_write) = match raw_term::pair() {
-                Ok(v) => v,
-                Err(e) => {
-                    let e = e.context("Failed to initialize raw terminal");
-                    return Box::new(future::err(e.into()));
-                }
-            };
-
-            let to_term = Forwarder::new(socket_read, term_write).map_err(|e| {
-                e.context("Failed to forward data from socket to terminal").into()
-            });
-
-            let to_socket = Forwarder::new(term_read, socket_write).map_err(|e| {
-                e.context("Failed to forward from terminal to socket").into()
-            });
-
-            let fut = to_term
-                .select(to_socket)
-                .map(|_| ())
-                .map_err(|(e, _): (failure::Error, _)| e);
-
-            Box::new(fut)
-        });
-
-    runtime.block_on(main_fut)?;
-    Ok(())
-}
-
-fn run() -> Result<(), Error> {
-    let app_m = App::new(clap::crate_name!())
-        .version(clap::crate_version!())
-        .author(clap::crate_authors!())
-        .setting(AppSettings::ArgRequiredElseHelp)
-        .subcommand(
-            SubCommand::with_name("listen")
-                .arg(
-                    Arg::with_name("path")
-                        .takes_value(true)
-                        .required(true)
-                        .help("UNIX socket path"),
-                )
-                .about("Starts server for listening"),
-        )
-        .subcommand(
-            SubCommand::with_name("connect")
-                .arg(
-                    Arg::with_name("path")
-                        .takes_value(true)
-                        .required(true)
-                        .help("UNIX socket path"),
-                )
-                .about("Connect to server"),
-        )
-        .get_matches();
-
-    match app_m.subcommand() {
-        ("listen", Some(sub_m)) => cmd_listen(sub_m),
-        ("connect", Some(sub_m)) => cmd_connect(sub_m),
-        _ => Ok(()),
-    }
-}
-
-fn main() {
-    if let Err(ref e) = run() {
-        display_error(e);
-        std::process::exit(1);
-    }
+        Ok(())
+    })
 }
