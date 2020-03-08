@@ -13,7 +13,8 @@ use tokio::io::{self, AsyncRead, AsyncWrite};
 use tokio_fd::AsyncFd;
 
 pub async fn spawn_shell() -> Result<(Master, Child)> {
-    let master = OpenOptions::new().read(true).write(true).open("/dev/ptmx").await?;
+    let master =
+        OpenOptions::new().read(true).write(true).open("/dev/ptmx").await?;
 
     let slave_path: PathBuf = unsafe {
         let master_fd = master.as_raw_fd();
@@ -45,7 +46,8 @@ pub async fn spawn_shell() -> Result<(Master, Child)> {
 }
 
 async fn slave_spawn_shell(slave_path: &Path) -> Result<Child> {
-    let slave = OpenOptions::new().read(true).write(true).open(slave_path).await?;
+    let slave =
+        OpenOptions::new().read(true).write(true).open(slave_path).await?;
 
     let slave_fd = slave.as_raw_fd();
     let mut cmd = Command::new("bash");
@@ -102,11 +104,17 @@ impl AsyncWrite for Master {
         Pin::new(&mut self.fd).poll_write(cx, buf)
     }
 
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<io::Result<()>> {
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context,
+    ) -> Poll<io::Result<()>> {
         Pin::new(&mut self.fd).poll_flush(cx)
     }
 
-    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<io::Result<()>> {
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context,
+    ) -> Poll<io::Result<()>> {
         Pin::new(&mut self.fd).poll_shutdown(cx)
     }
 }

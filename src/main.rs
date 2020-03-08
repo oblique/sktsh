@@ -29,8 +29,11 @@ enum Opts {
 }
 
 fn main() -> Result<()> {
-    let mut rt =
-        tokio::runtime::Builder::new().threaded_scheduler().enable_all().build().unwrap();
+    let mut rt = tokio::runtime::Builder::new()
+        .threaded_scheduler()
+        .enable_all()
+        .build()
+        .unwrap();
 
     rt.block_on(async {
         let opts = Opts::from_args();

@@ -1,5 +1,6 @@
 use libc::{
-    cfmakeraw, tcgetattr, tcsetattr, termios, STDIN_FILENO, STDOUT_FILENO, TCSANOW,
+    cfmakeraw, tcgetattr, tcsetattr, termios, STDIN_FILENO, STDOUT_FILENO,
+    TCSANOW,
 };
 use std::convert::TryFrom;
 use std::io;
@@ -75,11 +76,17 @@ impl AsyncWrite for RawTerm {
         Pin::new(&mut self.stdout).poll_write(cx, buf)
     }
 
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<io::Result<()>> {
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context,
+    ) -> Poll<io::Result<()>> {
         Pin::new(&mut self.stdout).poll_flush(cx)
     }
 
-    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<io::Result<()>> {
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context,
+    ) -> Poll<io::Result<()>> {
         Pin::new(&mut self.stdout).poll_shutdown(cx)
     }
 }
