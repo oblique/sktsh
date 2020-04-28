@@ -1,20 +1,19 @@
 use anyhow::{bail, Result};
 use libc::{dup2, grantpt, ptsname_r, setsid, unlockpt};
-use std::convert::TryFrom;
 use std::ffi::CStr;
 use std::os::unix::io::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
 use std::process::{Child, Command};
-use std::task::{Context, Poll};
-use tokio::fs::{File, OpenOptions};
-use tokio::io::{self, AsyncRead, AsyncWrite};
-use tokio_fd::AsyncFd;
+
+use smol::Async;
+use std::fs::{File, OpenOptions};
+use std::io;
+
+pub type Master = Async<File>;
 
 pub async fn spawn_shell() -> Result<(Master, Child)> {
-    let master =
-        OpenOptions::new().read(true).write(true).open("/dev/ptmx").await?;
+    let master = OpenOptions::new().read(true).write(true).open("/dev/ptmx")?;
 
     let slave_path: PathBuf = unsafe {
         let master_fd = master.as_raw_fd();
@@ -46,8 +45,7 @@ pub async fn spawn_shell() -> Result<(Master, Child)> {
 }
 
 async fn slave_spawn_shell(slave_path: &Path) -> Result<Child> {
-    let slave =
-        OpenOptions::new().read(true).write(true).open(slave_path).await?;
+    let slave = OpenOptions::new().read(true).write(true).open(slave_path)?;
 
     let slave_fd = slave.as_raw_fd();
     let mut cmd = Command::new("bash");
@@ -58,7 +56,7 @@ async fn slave_spawn_shell(slave_path: &Path) -> Result<Child> {
             dup2(slave_fd, 1);
             dup2(slave_fd, 2);
 
-            for fd in 3..=4096 {
+            for fd in 3..4096 {
                 libc::close(fd);
             }
 
@@ -69,52 +67,4 @@ async fn slave_spawn_shell(slave_path: &Path) -> Result<Child> {
     }
 
     Ok(cmd.spawn()?)
-}
-
-pub struct Master {
-    fd: AsyncFd,
-    _file: File,
-}
-
-impl Master {
-    fn new(file: File) -> Result<Self> {
-        Ok(Master {
-            fd: AsyncFd::try_from(file.as_raw_fd())?,
-            _file: file,
-        })
-    }
-}
-
-impl AsyncRead for Master {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context,
-        buf: &mut [u8],
-    ) -> Poll<io::Result<usize>> {
-        Pin::new(&mut self.fd).poll_read(cx, buf)
-    }
-}
-
-impl AsyncWrite for Master {
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context,
-        buf: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        Pin::new(&mut self.fd).poll_write(cx, buf)
-    }
-
-    fn poll_flush(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context,
-    ) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.fd).poll_flush(cx)
-    }
-
-    fn poll_shutdown(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context,
-    ) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.fd).poll_shutdown(cx)
-    }
 }

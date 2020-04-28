@@ -1,25 +1,26 @@
+use futures::prelude::*;
 use libc::{
     cfmakeraw, tcgetattr, tcsetattr, termios, STDIN_FILENO, STDOUT_FILENO,
     TCSANOW,
 };
-use std::convert::TryFrom;
+use smol::Async;
 use std::io;
 use std::mem::MaybeUninit;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use tokio::io::{AsyncRead, AsyncWrite};
-use tokio_fd::AsyncFd;
+
+use crate::fd::Fd;
 
 pub struct RawTerm {
-    stdin: AsyncFd,
-    stdout: AsyncFd,
+    stdin: Async<Fd>,
+    stdout: Async<Fd>,
     saved_attrs: termios,
 }
 
 impl RawTerm {
     pub fn new() -> io::Result<Self> {
-        let stdin = AsyncFd::try_from(STDIN_FILENO)?;
-        let stdout = AsyncFd::try_from(STDOUT_FILENO)?;
+        let stdin = Async::new(Fd(STDIN_FILENO))?;
+        let stdout = Async::new(Fd(STDOUT_FILENO))?;
 
         let saved_attrs = unsafe {
             let mut saved_attrs = MaybeUninit::<termios>::uninit();
@@ -83,10 +84,10 @@ impl AsyncWrite for RawTerm {
         Pin::new(&mut self.stdout).poll_flush(cx)
     }
 
-    fn poll_shutdown(
+    fn poll_close(
         mut self: Pin<&mut Self>,
         cx: &mut Context,
     ) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.stdout).poll_shutdown(cx)
+        Pin::new(&mut self.stdout).poll_close(cx)
     }
 }

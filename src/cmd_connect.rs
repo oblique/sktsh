@@ -1,20 +1,21 @@
 use anyhow::Result;
+use futures::prelude::*;
+use smol::Async;
+use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::UnixStream;
 
 use crate::raw_term::RawTerm;
 
 pub async fn cmd_connect(path: PathBuf) -> Result<()> {
-    let mut socket = UnixStream::connect(path).await?;
+    let mut socket = Async::<UnixStream>::connect(path).await?;
     let mut raw_term = RawTerm::new()?;
     let mut socket_buf = [0u8; 1024];
     let mut raw_term_buf = [0u8; 1024];
 
     loop {
-        tokio::select! {
+        futures::select! {
             // whatever we read from `socket` we write it to `raw_term`
-            res = socket.read(&mut socket_buf) => {
+            res = socket.read(&mut socket_buf).fuse() => {
                 match res {
                     Ok(0) => break,
                     Ok(len) => raw_term
@@ -26,7 +27,7 @@ pub async fn cmd_connect(path: PathBuf) -> Result<()> {
             }
 
             // whatever we read from `raw_term` we write it to `socket`
-            res = raw_term.read(&mut raw_term_buf) => {
+            res = raw_term.read(&mut raw_term_buf).fuse() => {
                 match res {
                     Ok(0) => break,
                     Ok(len) => socket

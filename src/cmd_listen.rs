@@ -1,9 +1,8 @@
 use anyhow::{Context, Result};
+use futures::prelude::*;
+use smol::{Async, Task};
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{UnixListener, UnixStream};
-use tokio::stream::StreamExt;
-use tokio::task;
 
 use crate::errors::*;
 use crate::pty;
@@ -11,30 +10,31 @@ use crate::pty;
 pub async fn cmd_listen(path: PathBuf) -> Result<()> {
     let _ = std::fs::remove_file(&path);
 
-    let mut listener = UnixListener::bind(path)?;
+    let listener = Async::<UnixListener>::bind(path)?;
     let mut incoming = listener.incoming();
 
     while let Some(Ok(client)) = incoming.next().await {
-        task::spawn(async move {
+        Task::local(async move {
             if let Err(e) = handle_client(client).await {
                 println!("{:?}", e);
             }
-        });
+        })
+        .detach();
     }
 
     Ok(())
 }
 
-async fn handle_client(mut client: UnixStream) -> Result<()> {
+async fn handle_client(mut client: Async<UnixStream>) -> Result<()> {
     let mut client_buf = [0u8; 1024];
     let mut master_buf = [0u8; 1024];
 
     let (mut master, mut shell_process) = pty::spawn_shell().await?;
 
     loop {
-        tokio::select! {
+        futures::select! {
             // whatever we read from `client` we write it to `master`
-            res = client.read(&mut client_buf) => {
+            res = client.read(&mut client_buf).fuse() => {
                 match res {
                     Ok(0) => break,
                     Ok(len) => master
@@ -47,7 +47,7 @@ async fn handle_client(mut client: UnixStream) -> Result<()> {
             }
 
             // whatever we read from `master` we write it to `client`
-            res = master.read(&mut master_buf) => {
+            res = master.read(&mut master_buf).fuse() => {
                 match res {
                     Ok(0) => break,
                     Ok(len) => client

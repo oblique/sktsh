@@ -7,6 +7,7 @@ use structopt::StructOpt;
 mod cmd_connect;
 mod cmd_listen;
 mod errors;
+mod fd;
 mod pty;
 mod raw_term;
 
@@ -29,13 +30,7 @@ enum Opts {
 }
 
 fn main() -> Result<()> {
-    let mut rt = tokio::runtime::Builder::new()
-        .threaded_scheduler()
-        .enable_all()
-        .build()
-        .unwrap();
-
-    rt.block_on(async {
+    smol::run(async {
         let opts = Opts::from_args();
 
         match opts {
