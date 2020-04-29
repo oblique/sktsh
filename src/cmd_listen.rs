@@ -14,7 +14,7 @@ pub async fn cmd_listen(path: PathBuf) -> Result<()> {
     let mut incoming = listener.incoming();
 
     while let Some(Ok(client)) = incoming.next().await {
-        Task::local(async move {
+        Task::spawn(async move {
             if let Err(e) = handle_client(client).await {
                 println!("{:?}", e);
             }
