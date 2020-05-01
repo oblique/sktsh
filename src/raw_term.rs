@@ -1,31 +1,46 @@
 use futures::prelude::*;
 use libc::{
-    cfmakeraw, tcgetattr, tcsetattr, termios, STDIN_FILENO, STDOUT_FILENO,
+    cfmakeraw, dup, tcgetattr, tcsetattr, termios, STDIN_FILENO, STDOUT_FILENO,
     TCSANOW,
 };
 use smol::Async;
+use std::fs::File;
 use std::io;
 use std::mem::MaybeUninit;
+use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use crate::fd::Fd;
-
 pub struct RawTerm {
-    stdin: Async<Fd>,
-    stdout: Async<Fd>,
+    stdin: Async<File>,
+    stdout: Async<File>,
     saved_attrs: termios,
 }
 
 impl RawTerm {
     pub fn new() -> io::Result<Self> {
-        let stdin = Async::new(Fd(STDIN_FILENO))?;
-        let stdout = Async::new(Fd(STDOUT_FILENO))?;
+        let stdin = unsafe {
+            let fd = dup(STDIN_FILENO);
+            if fd < 0 {
+                return Err(io::Error::last_os_error());
+            }
+
+            Async::new(File::from_raw_fd(fd as RawFd))?
+        };
+
+        let stdout = unsafe {
+            let fd = dup(STDOUT_FILENO);
+            if fd < 0 {
+                return Err(io::Error::last_os_error());
+            }
+
+            Async::new(File::from_raw_fd(fd as RawFd))?
+        };
 
         let saved_attrs = unsafe {
             let mut saved_attrs = MaybeUninit::<termios>::uninit();
 
-            let rc = tcgetattr(STDOUT_FILENO, saved_attrs.as_mut_ptr());
+            let rc = tcgetattr(stdout.as_raw_fd(), saved_attrs.as_mut_ptr());
             if rc < 0 {
                 return Err(io::Error::last_os_error());
             }
@@ -34,7 +49,7 @@ impl RawTerm {
             let mut raw_attrs = saved_attrs;
             cfmakeraw(&mut raw_attrs);
 
-            let rc = tcsetattr(STDOUT_FILENO, TCSANOW, &raw_attrs);
+            let rc = tcsetattr(stdout.as_raw_fd(), TCSANOW, &raw_attrs);
             if rc < 0 {
                 return Err(io::Error::last_os_error());
             }
@@ -53,7 +68,8 @@ impl RawTerm {
 impl Drop for RawTerm {
     fn drop(&mut self) {
         unsafe {
-            let _ = tcsetattr(STDOUT_FILENO, TCSANOW, &self.saved_attrs);
+            let _ =
+                tcsetattr(self.stdout.as_raw_fd(), TCSANOW, &self.saved_attrs);
         }
     }
 }

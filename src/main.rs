@@ -7,7 +7,6 @@ use structopt::StructOpt;
 mod cmd_connect;
 mod cmd_listen;
 mod errors;
-mod fd;
 mod pty;
 mod raw_term;
 
