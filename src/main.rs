@@ -9,6 +9,7 @@ mod cmd_listen;
 mod errors;
 mod pty;
 mod raw_term;
+mod server;
 
 use crate::cmd_connect::cmd_connect;
 use crate::cmd_listen::cmd_listen;
