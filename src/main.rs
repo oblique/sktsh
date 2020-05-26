@@ -4,6 +4,7 @@ use anyhow::Result;
 use std::path::PathBuf;
 use structopt::StructOpt;
 
+mod client;
 mod cmd_connect;
 mod cmd_listen;
 mod errors;
