@@ -6,6 +6,7 @@ use structopt::StructOpt;
 
 mod client;
 mod errors;
+mod msgs;
 mod pty;
 mod raw_term;
 mod server;
