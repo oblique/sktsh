@@ -6,7 +6,7 @@ use std::path::Path;
 use std::process::Child;
 
 use crate::errors::*;
-use crate::msgs::ServerMsg;
+use crate::msgs::*;
 use crate::pty;
 
 pub struct Server {
@@ -72,27 +72,34 @@ where
             futures::select! {
                 // whatever we read from `client` we write it to `master`
                 res = self.client.read_exact(&mut client_len_buf).fuse() => {
-                    res?;
-
+                    res.context(HandleClientError::ClientToPtyFailed)?;
                     let msg_len = u32::from_be_bytes(client_len_buf) as usize;
-                    self.client.read_exact(&mut client_buf[..msg_len]).await?;
+
+                    self.client
+                        .read_exact(&mut client_buf[..msg_len])
+                        .await
+                        .context(HandleClientError::ClientToPtyFailed)?;
 
                     if let Ok(msg) =
                         bincode::deserialize(&client_buf[..msg_len])
                     {
-                        self.handle_msg(msg).await?;
+                        self.handle_msg(msg)
+                            .await
+                            .context(HandleClientError::ClientToPtyFailed)?;
                     }
                 }
 
                 // whatever we read from `master` we write it to `client`
-                res = self.master.read(&mut master_buf).fuse() => match res? {
-                    0 => break,
-                    len => self
-                        .client
-                        .write_all(&master_buf[..len])
-                        .await
-                        .context(HandleClientError::PtyToClientFailed)?,
-                },
+                res = self.master.read(&mut master_buf).fuse() => {
+                    match res.context(HandleClientError::PtyToClientFailed)? {
+                        0 => break,
+                        len => self
+                            .client
+                            .write_all(&master_buf[..len])
+                            .await
+                            .context(HandleClientError::PtyToClientFailed)?,
+                    }
+                }
             }
         }
 
@@ -103,11 +110,8 @@ where
 
     async fn handle_msg(&mut self, msg: ServerMsg<'_>) -> Result<()> {
         match msg {
-            ServerMsg::Data(data) => self
-                .master
-                .write_all(data)
-                .await
-                .context(HandleClientError::ClientToPtyFailed)?,
+            ServerMsg::Data(data) => self.master.write_all(data).await?,
+            ServerMsg::SetDimensions(dim) => self.master.set_dimensions(dim)?,
         }
 
         Ok(())

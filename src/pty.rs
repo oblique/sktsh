@@ -1,7 +1,12 @@
 use anyhow::{bail, Result};
 use futures::io::{AsyncRead, AsyncWrite};
-use libc::{dup2, grantpt, ptsname_r, setsid, unlockpt};
+use libc::{
+    dup2, grantpt, ioctl, ptsname_r, setsid, unlockpt, winsize, TIOCSWINSZ,
+};
+use smol::Async;
 use std::ffi::CStr;
+use std::fs::{File, OpenOptions};
+use std::io;
 use std::os::unix::io::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -9,9 +14,7 @@ use std::pin::Pin;
 use std::process::{Child, Command};
 use std::task::{Context, Poll};
 
-use smol::Async;
-use std::fs::{File, OpenOptions};
-use std::io;
+use crate::msgs::TermDimensions;
 
 pub struct Master {
     file: Async<File>,
@@ -22,6 +25,25 @@ impl Master {
         Master {
             file,
         }
+    }
+
+    pub fn set_dimensions(&mut self, dim: TermDimensions) -> io::Result<()> {
+        let winsz = winsize {
+            ws_row: dim.rows,
+            ws_col: dim.columns,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+
+        let rc = unsafe {
+            ioctl(self.file.as_raw_fd(), TIOCSWINSZ, &winsz as *const winsize)
+        };
+
+        if rc < 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        Ok(())
     }
 }
 

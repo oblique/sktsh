@@ -1,7 +1,7 @@
 use futures::prelude::*;
 use libc::{
-    cfmakeraw, dup, tcgetattr, tcsetattr, termios, STDIN_FILENO, STDOUT_FILENO,
-    TCSANOW,
+    cfmakeraw, dup, ioctl, tcgetattr, tcsetattr, termios, winsize,
+    STDIN_FILENO, STDOUT_FILENO, TCSANOW, TIOCGWINSZ,
 };
 use smol::Async;
 use std::fs::File;
@@ -10,6 +10,8 @@ use std::mem::MaybeUninit;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::pin::Pin;
 use std::task::{Context, Poll};
+
+use crate::msgs::TermDimensions;
 
 pub struct RawTerm {
     stdin: Async<File>,
@@ -61,6 +63,25 @@ impl RawTerm {
             stdin,
             stdout,
             saved_attrs,
+        })
+    }
+
+    pub fn dimensions(&mut self) -> io::Result<TermDimensions> {
+        let winsz = unsafe {
+            let mut winsz = MaybeUninit::<winsize>::uninit();
+            let rc =
+                ioctl(self.stdout.as_raw_fd(), TIOCGWINSZ, winsz.as_mut_ptr());
+
+            if rc < 0 {
+                return Err(io::Error::last_os_error());
+            }
+
+            winsz.assume_init()
+        };
+
+        Ok(TermDimensions {
+            rows: winsz.ws_row,
+            columns: winsz.ws_col,
         })
     }
 }

@@ -9,6 +9,7 @@ use crate::raw_term::RawTerm;
 
 pub struct Client {
     socket: Async<UnixStream>,
+    raw_term: Option<RawTerm>,
 }
 
 impl Client {
@@ -18,32 +19,61 @@ impl Client {
 
         Ok(Client {
             socket,
+            raw_term: None,
         })
     }
 
     pub async fn spawn_shell(&mut self) -> Result<()> {
-        let mut raw_term = RawTerm::new()?;
         let mut socket_buf = [0u8; 1024];
         let mut raw_term_buf = [0u8; 512];
+        let mut signal_buf = [0u8; 1];
+
+        self.raw_term = Some(RawTerm::new()?);
+        self.send_term_dimensions().await?;
+
+        let (tx_signal, mut rx_signal) = Async::<UnixStream>::pair()?;
+        signal_hook::pipe::register(signal_hook::SIGWINCH, tx_signal)?;
 
         loop {
             futures::select! {
                 // whatever we read from `socket` we write it to `raw_term`
                 res = self.socket.read(&mut socket_buf).fuse() => match res? {
                     0 => break,
-                    len => raw_term.write_all(&socket_buf[..len]).await?,
+                    len => {
+                        self.raw_term
+                            .as_mut()
+                            .unwrap()
+                            .write_all(&socket_buf[..len])
+                            .await?
+                    }
                 },
 
                 // whatever we read from `raw_term` we write it to `socket`
-                res = raw_term.read(&mut raw_term_buf).fuse() => match res? {
-                    0 => break,
-                    len => {
-                        let msg = ServerMsg::Data(&raw_term_buf[..len]);
-                        self.send_server_msg(msg).await?;
+                res = self
+                    .raw_term
+                    .as_mut()
+                    .unwrap()
+                    .read(&mut raw_term_buf)
+                    .fuse() =>
+                {
+                    match res? {
+                        0 => break,
+                        len => {
+                            let msg = ServerMsg::Data(&raw_term_buf[..len]);
+                            self.send_server_msg(msg).await?;
+                        }
                     }
+                }
+
+                // SIGWINCH received (i.e. terminal dimensions changed)
+                res = rx_signal.read(&mut signal_buf).fuse() => match res? {
+                    0 => break,
+                    _ => self.send_term_dimensions().await?,
                 },
             }
         }
+
+        self.raw_term.take();
 
         Ok(())
     }
@@ -54,6 +84,16 @@ impl Client {
 
         self.socket.write_all(&raw_len).await?;
         self.socket.write_all(&raw_msg).await?;
+
+        Ok(())
+    }
+
+    async fn send_term_dimensions(&mut self) -> Result<()> {
+        if let Some(raw_term) = self.raw_term.as_mut() {
+            let dim = raw_term.dimensions()?;
+            let msg = ServerMsg::SetDimensions(dim);
+            self.send_server_msg(msg).await?;
+        }
 
         Ok(())
     }
