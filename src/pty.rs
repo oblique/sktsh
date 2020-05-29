@@ -1,16 +1,63 @@
 use anyhow::{bail, Result};
+use futures::io::{AsyncRead, AsyncWrite};
 use libc::{dup2, grantpt, ptsname_r, setsid, unlockpt};
 use std::ffi::CStr;
 use std::os::unix::io::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::process::{Child, Command};
+use std::task::{Context, Poll};
 
 use smol::Async;
 use std::fs::{File, OpenOptions};
 use std::io;
 
-pub type Master = Async<File>;
+pub struct Master {
+    file: Async<File>,
+}
+
+impl Master {
+    fn new(file: Async<File>) -> Self {
+        Master {
+            file,
+        }
+    }
+}
+
+impl AsyncRead for Master {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context,
+        buf: &mut [u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.file).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for Master {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.file).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.file).poll_flush(cx)
+    }
+
+    fn poll_close(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.file).poll_close(cx)
+    }
+}
 
 pub async fn spawn_shell() -> Result<(Master, Child)> {
     let master = OpenOptions::new().read(true).write(true).open("/dev/ptmx")?;
@@ -38,7 +85,7 @@ pub async fn spawn_shell() -> Result<(Master, Child)> {
         path.to_str().unwrap().into()
     };
 
-    let master = Master::new(master)?;
+    let master = Master::new(Async::new(master)?);
     let child = slave_spawn_shell(&slave_path).await?;
 
     Ok((master, child))
