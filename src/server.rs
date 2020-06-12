@@ -4,7 +4,7 @@ use futures::future::{Fuse, FusedFuture};
 use futures::prelude::*;
 use smol::{Async, Task};
 use std::cell::UnsafeCell;
-use std::os::unix::net::UnixListener;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::process::Child;
 
@@ -16,11 +16,8 @@ pub struct Server {
     listener: Async<UnixListener>,
 }
 
-struct Handler<S>
-where
-    for<'a> &'a S: AsyncRead + AsyncWrite + Send + Unpin,
-{
-    client: Arc<S>,
+struct Handler {
+    client: Arc<Async<UnixStream>>,
     master: Arc<pty::Master>,
     shell_process: Child,
 }
@@ -59,10 +56,7 @@ impl Server {
     }
 }
 
-impl<S> Handler<S>
-where
-    for<'a> &'a S: AsyncRead + AsyncWrite + Send + Unpin,
-{
+impl Handler {
     async fn handle_client(&mut self) -> Result<()> {
         let master_buf = UnsafeCell::new([0u8; 1024]);
         let client_len_buf = UnsafeCell::new([0u8; 4]);
