@@ -39,7 +39,7 @@ impl Server {
 
         while let Some(Ok(client)) = incoming.next().await {
             if let Ok((master, shell_process)) = pty::spawn_shell().await {
-                let mut handler = Handler {
+                let handler = Handler {
                     client: Arc::new(client),
                     master: Arc::new(master),
                     shell_process,
@@ -57,7 +57,7 @@ impl Server {
 }
 
 impl Handler {
-    async fn handle_client(&mut self) -> Result<()> {
+    async fn handle_client(mut self) -> Result<()> {
         let master_buf = UnsafeCell::new([0u8; 1024]);
         let client_len_buf = UnsafeCell::new([0u8; 4]);
         let mut client_buf = Vec::new();
@@ -120,9 +120,6 @@ impl Handler {
             }
         }
 
-        // TODO: kill on drop too
-        let _ = self.shell_process.kill();
-
         Ok(())
     }
 
@@ -133,5 +130,12 @@ impl Handler {
         }
 
         Ok(())
+    }
+}
+
+impl Drop for Handler {
+    fn drop(&mut self) {
+        let _ = self.shell_process.kill();
+        let _ = self.shell_process.wait();
     }
 }
