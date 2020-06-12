@@ -1,6 +1,9 @@
 use anyhow::{Context, Result};
+use async_dup::Arc;
+use futures::future::{Fuse, FusedFuture};
 use futures::prelude::*;
 use smol::{Async, Task};
+use std::cell::UnsafeCell;
 use std::os::unix::net::UnixListener;
 use std::path::Path;
 use std::process::Child;
@@ -15,10 +18,10 @@ pub struct Server {
 
 struct Handler<S>
 where
-    S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
+    for<'a> &'a S: AsyncRead + AsyncWrite + Send + Unpin,
 {
-    client: S,
-    master: pty::Master,
+    client: Arc<S>,
+    master: Arc<pty::Master>,
     shell_process: Child,
 }
 
@@ -40,12 +43,12 @@ impl Server {
         while let Some(Ok(client)) = incoming.next().await {
             if let Ok((master, shell_process)) = pty::spawn_shell().await {
                 let mut handler = Handler {
-                    client,
-                    master,
+                    client: Arc::new(client),
+                    master: Arc::new(master),
                     shell_process,
                 };
 
-                Task::spawn(async move {
+                Task::local(async move {
                     if let Err(e) = handler.handle_client().await {
                         println!("{:?}", e);
                     }
@@ -58,31 +61,46 @@ impl Server {
 
 impl<S> Handler<S>
 where
-    S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
+    for<'a> &'a S: AsyncRead + AsyncWrite + Send + Unpin,
 {
-    async fn handle_client(&mut self) -> Result<()>
-    where
-        S: AsyncRead + AsyncWrite + Send + Unpin,
-    {
-        let mut client_len_buf = [0u8; 4];
-        let mut client_buf = [0u8; 1024];
-        let mut master_buf = [0u8; 1024];
+    async fn handle_client(&mut self) -> Result<()> {
+        let master_buf = UnsafeCell::new([0u8; 1024]);
+        let client_len_buf = UnsafeCell::new([0u8; 4]);
+        let mut client_buf = Vec::new();
+
+        let mut client_dup = self.client.clone();
+        let mut master_dup = self.master.clone();
+
+        let mut client_read_len_fut = Fuse::terminated();
+        let mut master_read_fut = Fuse::terminated();
 
         loop {
+            if client_read_len_fut.is_terminated() {
+                let buf = unsafe { client_len_buf.get().as_mut().unwrap() };
+                client_read_len_fut = client_dup.read_exact(buf).fuse();
+            }
+
+            if master_read_fut.is_terminated() {
+                let buf = unsafe { master_buf.get().as_mut().unwrap() };
+                master_read_fut = master_dup.read(buf).fuse();
+            }
+
             futures::select! {
                 // whatever we read from `client` we write it to `master`
-                res = self.client.read_exact(&mut client_len_buf).fuse() => {
+                res = client_read_len_fut => {
                     res.context(HandleClientError::ClientToPtyFailed)?;
-                    let msg_len = u32::from_be_bytes(client_len_buf) as usize;
+
+                    let msg_len_buf = unsafe { *client_len_buf.get() };
+                    let msg_len = u32::from_be_bytes(msg_len_buf) as usize;
+
+                    client_buf.resize(msg_len, 0);
 
                     self.client
-                        .read_exact(&mut client_buf[..msg_len])
+                        .read_exact(&mut client_buf[..])
                         .await
                         .context(HandleClientError::ClientToPtyFailed)?;
 
-                    if let Ok(msg) =
-                        bincode::deserialize(&client_buf[..msg_len])
-                    {
+                    if let Ok(msg) = bincode::deserialize(&client_buf) {
                         self.handle_msg(msg)
                             .await
                             .context(HandleClientError::ClientToPtyFailed)?;
@@ -90,19 +108,25 @@ where
                 }
 
                 // whatever we read from `master` we write it to `client`
-                res = self.master.read(&mut master_buf).fuse() => {
-                    match res.context(HandleClientError::PtyToClientFailed)? {
-                        0 => break,
-                        len => self
-                            .client
-                            .write_all(&master_buf[..len])
-                            .await
-                            .context(HandleClientError::PtyToClientFailed)?,
+                res = master_read_fut => {
+                    let len =
+                        res.context(HandleClientError::PtyToClientFailed)?;
+
+                    if len == 0 {
+                        break;
                     }
+
+                    let data =
+                        unsafe { &master_buf.get().as_ref().unwrap()[..len] };
+                    self.client
+                        .write_all(data)
+                        .await
+                        .context(HandleClientError::PtyToClientFailed)?;
                 }
             }
         }
 
+        // TODO: kill on drop too
         let _ = self.shell_process.kill();
 
         Ok(())

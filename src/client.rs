@@ -1,6 +1,9 @@
 use anyhow::Result;
+use async_dup::Arc;
+use futures::future::{Fuse, FusedFuture};
 use futures::prelude::*;
 use smol::Async;
+use std::cell::UnsafeCell;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 
@@ -8,72 +11,88 @@ use crate::msgs::ServerMsg;
 use crate::raw_term::RawTerm;
 
 pub struct Client {
-    socket: Async<UnixStream>,
-    raw_term: Option<RawTerm>,
+    socket: Arc<Async<UnixStream>>,
+    raw_term: Arc<RawTerm>,
 }
 
 impl Client {
     pub async fn connect(unix_sock_path: impl AsRef<Path>) -> Result<Self> {
         let path = unix_sock_path.as_ref();
-        let socket = Async::<UnixStream>::connect(path).await?;
+
+        let socket = Arc::new(Async::<UnixStream>::connect(path).await?);
+        let raw_term = Arc::new(RawTerm::new()?);
 
         Ok(Client {
             socket,
-            raw_term: None,
+            raw_term,
         })
     }
 
     pub async fn spawn_shell(&mut self) -> Result<()> {
-        let mut socket_buf = [0u8; 1024];
-        let mut raw_term_buf = [0u8; 512];
-        let mut signal_buf = [0u8; 1];
+        let socket_buf = UnsafeCell::new([0u8; 1024]);
+        let raw_term_buf = UnsafeCell::new([0u8; 1024]);
+        let mut sigwinch_buf = [0u8; 1];
 
-        self.raw_term = Some(RawTerm::new()?);
+        let (mut sigwinch_rx, sigwinch_tx) = Async::<UnixStream>::pair()?;
+        signal_hook::pipe::register(signal_hook::SIGWINCH, sigwinch_tx)?;
+
+        let mut socket_dup = self.socket.clone();
+        let mut raw_term_dup = self.raw_term.clone();
+
+        let mut socket_read_fut = Fuse::terminated();
+        let mut raw_term_read_fut = Fuse::terminated();
+        let mut sigwinch_fut = Fuse::terminated();
+
         self.send_term_dimensions().await?;
 
-        let (tx_signal, mut rx_signal) = Async::<UnixStream>::pair()?;
-        signal_hook::pipe::register(signal_hook::SIGWINCH, tx_signal)?;
-
         loop {
+            if socket_read_fut.is_terminated() {
+                let buf = unsafe { socket_buf.get().as_mut().unwrap() };
+                socket_read_fut = socket_dup.read(buf).fuse();
+            }
+
+            if raw_term_read_fut.is_terminated() {
+                let buf = unsafe { raw_term_buf.get().as_mut().unwrap() };
+                raw_term_read_fut = raw_term_dup.read(buf).fuse();
+            }
+
+            if sigwinch_fut.is_terminated() {
+                sigwinch_fut = sigwinch_rx.read_exact(&mut sigwinch_buf).fuse();
+            }
+
             futures::select! {
                 // whatever we read from `socket` we write it to `raw_term`
-                res = self.socket.read(&mut socket_buf).fuse() => match res? {
-                    0 => break,
-                    len => {
-                        self.raw_term
-                            .as_mut()
-                            .unwrap()
-                            .write_all(&socket_buf[..len])
-                            .await?
+                res = socket_read_fut => {
+                    let len = res?;
+
+                    if len == 0 {
+                        break;
                     }
-                },
+
+                    let data =
+                        unsafe { &socket_buf.get().as_ref().unwrap()[..len] };
+                    self.raw_term.write_all(data).await?;
+                }
 
                 // whatever we read from `raw_term` we write it to `socket`
-                res = self
-                    .raw_term
-                    .as_mut()
-                    .unwrap()
-                    .read(&mut raw_term_buf)
-                    .fuse() =>
-                {
-                    match res? {
-                        0 => break,
-                        len => {
-                            let msg = ServerMsg::Data(&raw_term_buf[..len]);
-                            self.send_server_msg(msg).await?;
-                        }
+                res = raw_term_read_fut => {
+                    let len = res?;
+
+                    if len == 0 {
+                        break;
                     }
+
+                    let data =
+                        unsafe { &raw_term_buf.get().as_ref().unwrap()[..len] };
+                    self.send_server_msg(ServerMsg::Data(data)).await?;
                 }
 
                 // SIGWINCH received (i.e. terminal dimensions changed)
-                res = rx_signal.read(&mut signal_buf).fuse() => match res? {
-                    0 => break,
-                    _ => self.send_term_dimensions().await?,
-                },
+                res = sigwinch_fut => {
+                    self.send_term_dimensions().await?;
+                }
             }
         }
-
-        self.raw_term.take();
 
         Ok(())
     }
@@ -89,12 +108,8 @@ impl Client {
     }
 
     async fn send_term_dimensions(&mut self) -> Result<()> {
-        if let Some(raw_term) = self.raw_term.as_mut() {
-            let dim = raw_term.dimensions()?;
-            let msg = ServerMsg::SetDimensions(dim);
-            self.send_server_msg(msg).await?;
-        }
-
+        let dim = self.raw_term.dimensions()?;
+        self.send_server_msg(ServerMsg::SetDimensions(dim)).await?;
         Ok(())
     }
 }

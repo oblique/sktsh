@@ -27,7 +27,7 @@ impl Master {
         }
     }
 
-    pub fn set_dimensions(&mut self, dim: TermDimensions) -> io::Result<()> {
+    pub fn set_dimensions(&self, dim: TermDimensions) -> io::Result<()> {
         let winsz = winsize {
             ws_row: dim.rows,
             ws_col: dim.columns,
@@ -49,35 +49,69 @@ impl Master {
 
 impl AsyncRead for Master {
     fn poll_read(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         cx: &mut Context,
         buf: &mut [u8],
     ) -> Poll<io::Result<usize>> {
-        Pin::new(&mut self.file).poll_read(cx, buf)
+        Pin::new(&mut &self.file).poll_read(cx, buf)
     }
 }
 
 impl AsyncWrite for Master {
     fn poll_write(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         cx: &mut Context,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        Pin::new(&mut self.file).poll_write(cx, buf)
+        Pin::new(&mut &self.file).poll_write(cx, buf)
     }
 
     fn poll_flush(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         cx: &mut Context,
     ) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.file).poll_flush(cx)
+        Pin::new(&mut &self.file).poll_flush(cx)
     }
 
     fn poll_close(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         cx: &mut Context,
     ) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.file).poll_close(cx)
+        Pin::new(&mut &self.file).poll_close(cx)
+    }
+}
+
+impl<'a> AsyncRead for &'a Master {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context,
+        buf: &mut [u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut &self.file).poll_read(cx, buf)
+    }
+}
+
+impl<'a> AsyncWrite for &'a Master {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut &self.file).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        self: Pin<&mut Self>,
+        cx: &mut Context,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut &self.file).poll_flush(cx)
+    }
+
+    fn poll_close(
+        self: Pin<&mut Self>,
+        cx: &mut Context,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut &self.file).poll_close(cx)
     }
 }
 
