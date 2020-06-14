@@ -3,9 +3,10 @@ use async_dup::Arc;
 use futures::future::{Fuse, FusedFuture};
 use futures::prelude::*;
 use smol::Async;
-use std::cell::UnsafeCell;
+use std::cell::RefCell;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
+use std::pin::Pin;
 
 use crate::msgs::ServerMsg;
 use crate::raw_term::RawTerm;
@@ -29,15 +30,12 @@ impl Client {
     }
 
     pub async fn spawn_shell(&mut self) -> Result<()> {
-        let socket_buf = UnsafeCell::new([0u8; 1024]);
-        let raw_term_buf = UnsafeCell::new([0u8; 1024]);
+        let socket_buf = Arc::new(RefCell::new([0u8; 1024]));
+        let raw_term_buf = Arc::new(RefCell::new([0u8; 1024]));
         let mut sigwinch_buf = [0u8; 1];
 
         let (mut sigwinch_rx, sigwinch_tx) = Async::<UnixStream>::pair()?;
         signal_hook::pipe::register(signal_hook::SIGWINCH, sigwinch_tx)?;
-
-        let mut socket_dup = self.socket.clone();
-        let mut raw_term_dup = self.raw_term.clone();
 
         let mut socket_read_fut = Fuse::terminated();
         let mut raw_term_read_fut = Fuse::terminated();
@@ -47,18 +45,37 @@ impl Client {
 
         loop {
             if socket_read_fut.is_terminated() {
-                let buf = unsafe { socket_buf.get().as_mut().unwrap() };
-                socket_read_fut = socket_dup.read(buf).fuse();
+                let buf = socket_buf.clone();
+                let mut socket_dup = self.socket.clone();
+
+                socket_read_fut = async move {
+                    let mut buf = buf.borrow_mut();
+                    socket_dup.read(&mut buf[..]).await
+                }
+                .fuse();
             }
 
             if raw_term_read_fut.is_terminated() {
-                let buf = unsafe { raw_term_buf.get().as_mut().unwrap() };
-                raw_term_read_fut = raw_term_dup.read(buf).fuse();
+                let buf = raw_term_buf.clone();
+                let mut raw_term_dup = self.raw_term.clone();
+
+                raw_term_read_fut = async move {
+                    let mut buf = buf.borrow_mut();
+                    raw_term_dup.read(&mut buf[..]).await
+                }
+                .fuse();
             }
 
             if sigwinch_fut.is_terminated() {
                 sigwinch_fut = sigwinch_rx.read_exact(&mut sigwinch_buf).fuse();
             }
+
+            // Safety: This is safe becasue we do not move futures before
+            // their termiantion within or after the loop.
+            let mut socket_read_fut =
+                unsafe { Pin::new_unchecked(&mut socket_read_fut) };
+            let mut raw_term_read_fut =
+                unsafe { Pin::new_unchecked(&mut raw_term_read_fut) };
 
             futures::select! {
                 // whatever we read from `socket` we write it to `raw_term`
@@ -69,8 +86,7 @@ impl Client {
                         break;
                     }
 
-                    let data =
-                        unsafe { &socket_buf.get().as_ref().unwrap()[..len] };
+                    let data = &socket_buf.borrow()[..len];
                     self.raw_term.write_all(data).await?;
                 }
 
@@ -82,8 +98,7 @@ impl Client {
                         break;
                     }
 
-                    let data =
-                        unsafe { &raw_term_buf.get().as_ref().unwrap()[..len] };
+                    let data = &raw_term_buf.borrow()[..len];
                     self.send_server_msg(ServerMsg::Data(data)).await?;
                 }
 
