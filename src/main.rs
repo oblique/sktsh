@@ -35,11 +35,14 @@ struct ClientOpts {
 }
 
 async fn cmd_connect(opts: ClientOpts) -> Result<()> {
-    let mut client = Client::connect(opts.path).await?;
+    smol::Task::local(async {
+        let mut client = Client::connect(opts.path).await?;
 
-    client.spawn_shell().await?;
+        client.spawn_shell().await?;
 
-    Ok(())
+        Ok(())
+    })
+    .await
 }
 
 async fn cmd_listen(opts: ListenOpts) -> Result<()> {

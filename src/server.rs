@@ -3,7 +3,7 @@ use async_dup::Arc;
 use futures::future::{Fuse, FusedFuture};
 use futures::prelude::*;
 use smol::{Async, Task};
-use std::cell::UnsafeCell;
+use std::cell::RefCell;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::process::Child;
@@ -58,25 +58,36 @@ impl Server {
 
 impl Handler {
     async fn handle_client(mut self) -> Result<()> {
-        let master_buf = UnsafeCell::new([0u8; 1024]);
-        let client_len_buf = UnsafeCell::new([0u8; 4]);
+        let client_len_buf = Arc::new(RefCell::new([0u8; 4]));
         let mut client_buf = Vec::new();
-
-        let mut client_dup = self.client.clone();
-        let mut master_dup = self.master.clone();
+        let master_buf = Arc::new(RefCell::new([0u8; 1024]));
 
         let mut client_read_len_fut = Fuse::terminated();
         let mut master_read_fut = Fuse::terminated();
 
         loop {
             if client_read_len_fut.is_terminated() {
-                let buf = unsafe { client_len_buf.get().as_mut().unwrap() };
-                client_read_len_fut = client_dup.read_exact(buf).fuse();
+                let buf = client_len_buf.clone();
+                let mut client_dup = self.client.clone();
+
+                client_read_len_fut = async move {
+                    let mut buf = buf.borrow_mut();
+                    client_dup.read_exact(&mut buf[..]).await
+                }
+                .boxed_local()
+                .fuse();
             }
 
             if master_read_fut.is_terminated() {
-                let buf = unsafe { master_buf.get().as_mut().unwrap() };
-                master_read_fut = master_dup.read(buf).fuse();
+                let buf = master_buf.clone();
+                let mut master_dup = self.master.clone();
+
+                master_read_fut = async move {
+                    let mut buf = buf.borrow_mut();
+                    master_dup.read(&mut buf[..]).await
+                }
+                .boxed_local()
+                .fuse();
             }
 
             futures::select! {
@@ -84,7 +95,7 @@ impl Handler {
                 res = client_read_len_fut => {
                     res.context(HandleClientError::ClientToPtyFailed)?;
 
-                    let msg_len_buf = unsafe { *client_len_buf.get() };
+                    let msg_len_buf = client_len_buf.borrow().clone();
                     let msg_len = u32::from_be_bytes(msg_len_buf) as usize;
 
                     client_buf.resize(msg_len, 0);
@@ -110,8 +121,7 @@ impl Handler {
                         break;
                     }
 
-                    let data =
-                        unsafe { &master_buf.get().as_ref().unwrap()[..len] };
+                    let data = &master_buf.borrow()[..len];
                     self.client
                         .write_all(data)
                         .await
