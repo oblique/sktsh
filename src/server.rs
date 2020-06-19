@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use async_dup::Arc;
 use futures::future::{Fuse, FusedFuture};
 use futures::prelude::*;
 use smol::{Async, Task};
@@ -8,6 +7,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::pin::Pin;
 use std::process::Child;
+use std::rc::Rc;
 
 use crate::errors::*;
 use crate::msgs::*;
@@ -18,8 +18,8 @@ pub struct Server {
 }
 
 struct Handler {
-    client: Arc<Async<UnixStream>>,
-    master: Arc<pty::Master>,
+    client: Rc<Async<UnixStream>>,
+    master: Rc<pty::Master>,
     shell_process: Child,
 }
 
@@ -41,8 +41,8 @@ impl Server {
         while let Some(Ok(client)) = incoming.next().await {
             if let Ok((master, shell_process)) = pty::spawn_shell().await {
                 let handler = Handler {
-                    client: Arc::new(client),
-                    master: Arc::new(master),
+                    client: Rc::new(client),
+                    master: Rc::new(master),
                     shell_process,
                 };
 
@@ -59,9 +59,9 @@ impl Server {
 
 impl Handler {
     async fn handle_client(mut self) -> Result<()> {
-        let client_len_buf = Arc::new(RefCell::new([0u8; 4]));
+        let client_len_buf = Rc::new(RefCell::new([0u8; 4]));
         let mut client_buf = Vec::new();
-        let master_buf = Arc::new(RefCell::new([0u8; 1024]));
+        let master_buf = Rc::new(RefCell::new([0u8; 1024]));
 
         let mut client_read_len_fut = Fuse::terminated();
         let mut master_read_fut = Fuse::terminated();
@@ -69,22 +69,22 @@ impl Handler {
         loop {
             if client_read_len_fut.is_terminated() {
                 let buf = client_len_buf.clone();
-                let mut client_dup = self.client.clone();
+                let client_dup = self.client.clone();
 
                 client_read_len_fut = async move {
                     let mut buf = buf.borrow_mut();
-                    client_dup.read_exact(&mut buf[..]).await
+                    (&*client_dup).read_exact(&mut buf[..]).await
                 }
                 .fuse();
             }
 
             if master_read_fut.is_terminated() {
                 let buf = master_buf.clone();
-                let mut master_dup = self.master.clone();
+                let master_dup = self.master.clone();
 
                 master_read_fut = async move {
                     let mut buf = buf.borrow_mut();
-                    master_dup.read(&mut buf[..]).await
+                    (&*master_dup).read(&mut buf[..]).await
                 }
                 .fuse();
             }
@@ -106,7 +106,7 @@ impl Handler {
 
                     client_buf.resize(msg_len, 0);
 
-                    self.client
+                    (&*self.client)
                         .read_exact(&mut client_buf[..])
                         .await
                         .context(HandleClientError::ClientToPtyFailed)?;
@@ -128,7 +128,7 @@ impl Handler {
                     }
 
                     let data = &master_buf.borrow()[..len];
-                    self.client
+                    (&*self.client)
                         .write_all(data)
                         .await
                         .context(HandleClientError::PtyToClientFailed)?;
@@ -141,7 +141,7 @@ impl Handler {
 
     async fn handle_msg(&mut self, msg: ServerMsg<'_>) -> Result<()> {
         match msg {
-            ServerMsg::Data(data) => self.master.write_all(data).await?,
+            ServerMsg::Data(data) => (&*self.master).write_all(data).await?,
             ServerMsg::SetDimensions(dim) => self.master.set_dimensions(dim)?,
         }
 

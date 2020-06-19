@@ -1,5 +1,4 @@
 use anyhow::Result;
-use async_dup::Arc;
 use futures::future::{Fuse, FusedFuture};
 use futures::prelude::*;
 use smol::Async;
@@ -7,21 +6,22 @@ use std::cell::RefCell;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::pin::Pin;
+use std::rc::Rc;
 
 use crate::msgs::ServerMsg;
 use crate::raw_term::RawTerm;
 
 pub struct Client {
-    socket: Arc<Async<UnixStream>>,
-    raw_term: Arc<RawTerm>,
+    socket: Rc<Async<UnixStream>>,
+    raw_term: Rc<RawTerm>,
 }
 
 impl Client {
     pub async fn connect(unix_sock_path: impl AsRef<Path>) -> Result<Self> {
         let path = unix_sock_path.as_ref();
 
-        let socket = Arc::new(Async::<UnixStream>::connect(path).await?);
-        let raw_term = Arc::new(RawTerm::new()?);
+        let socket = Rc::new(Async::<UnixStream>::connect(path).await?);
+        let raw_term = Rc::new(RawTerm::new()?);
 
         Ok(Client {
             socket,
@@ -30,8 +30,8 @@ impl Client {
     }
 
     pub async fn spawn_shell(&mut self) -> Result<()> {
-        let socket_buf = Arc::new(RefCell::new([0u8; 1024]));
-        let raw_term_buf = Arc::new(RefCell::new([0u8; 1024]));
+        let socket_buf = Rc::new(RefCell::new([0u8; 1024]));
+        let raw_term_buf = Rc::new(RefCell::new([0u8; 1024]));
         let mut sigwinch_buf = [0u8; 1];
 
         let (mut sigwinch_rx, sigwinch_tx) = Async::<UnixStream>::pair()?;
@@ -46,22 +46,22 @@ impl Client {
         loop {
             if socket_read_fut.is_terminated() {
                 let buf = socket_buf.clone();
-                let mut socket_dup = self.socket.clone();
+                let socket_dup = self.socket.clone();
 
                 socket_read_fut = async move {
                     let mut buf = buf.borrow_mut();
-                    socket_dup.read(&mut buf[..]).await
+                    (&*socket_dup).read(&mut buf[..]).await
                 }
                 .fuse();
             }
 
             if raw_term_read_fut.is_terminated() {
                 let buf = raw_term_buf.clone();
-                let mut raw_term_dup = self.raw_term.clone();
+                let raw_term_dup = self.raw_term.clone();
 
                 raw_term_read_fut = async move {
                     let mut buf = buf.borrow_mut();
-                    raw_term_dup.read(&mut buf[..]).await
+                    (&*raw_term_dup).read(&mut buf[..]).await
                 }
                 .fuse();
             }
@@ -87,7 +87,7 @@ impl Client {
                     }
 
                     let data = &socket_buf.borrow()[..len];
-                    self.raw_term.write_all(data).await?;
+                    (&*self.raw_term).write_all(data).await?;
                 }
 
                 // whatever we read from `raw_term` we write it to `socket`
@@ -116,8 +116,8 @@ impl Client {
         let raw_msg = bincode::serialize(&msg)?;
         let raw_len = (raw_msg.len() as u32).to_be_bytes();
 
-        self.socket.write_all(&raw_len).await?;
-        self.socket.write_all(&raw_msg).await?;
+        (&*self.socket).write_all(&raw_len).await?;
+        (&*self.socket).write_all(&raw_msg).await?;
 
         Ok(())
     }
