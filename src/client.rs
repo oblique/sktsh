@@ -70,8 +70,8 @@ impl Client {
                 sigwinch_fut = sigwinch_rx.read_exact(&mut sigwinch_buf).fuse();
             }
 
-            // Safety: This is safe becasue we do not move futures before
-            // their termiantion within or after the loop.
+            // Safety: This is safe because we do not move futures before
+            // their termination within or after the loop.
             let mut socket_read_fut =
                 unsafe { Pin::new_unchecked(&mut socket_read_fut) };
             let mut raw_term_read_fut =

@@ -89,8 +89,8 @@ impl Handler {
                 .fuse();
             }
 
-            // Safety: This is safe becasue we do not move futures before
-            // their termiantion within or after the loop.
+            // Safety: This is safe because we do not move futures before
+            // their termination within or after the loop.
             let mut client_read_len_fut =
                 unsafe { Pin::new_unchecked(&mut client_read_len_fut) };
             let mut master_read_fut =
