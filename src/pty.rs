@@ -7,6 +7,7 @@ use smol::Async;
 use std::ffi::CStr;
 use std::fs::{File, OpenOptions};
 use std::io;
+use std::os::raw::c_char;
 use std::os::unix::io::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -120,7 +121,7 @@ pub async fn spawn_shell() -> Result<(Master, Child)> {
 
     let slave_path: PathBuf = unsafe {
         let master_fd = master.as_raw_fd();
-        let mut buf = [0i8; 1024];
+        let mut buf = [0 as c_char; 1024];
 
         let rc = grantpt(master_fd);
         if rc < 0 {
