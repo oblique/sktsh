@@ -10,6 +10,7 @@ mod msgs;
 mod pty;
 mod raw_term;
 mod server;
+mod utils;
 
 use crate::client::Client;
 use crate::server::Server;
@@ -43,22 +44,21 @@ async fn cmd_connect(opts: ClientOpts) -> Result<()> {
 }
 
 async fn cmd_listen(opts: ListenOpts) -> Result<()> {
-    let server = Server::bind(opts.path)?;
+    let server = Server::bind(opts.path).await?;
 
     server.handle_incoming_clients().await;
 
     Ok(())
 }
 
-fn main() -> Result<()> {
-    smol::run(async {
-        let opts = Opts::from_args();
+#[tokio::main]
+async fn main() -> Result<()> {
+    let opts = Opts::from_args();
 
-        match opts {
-            Opts::Listen(opts) => cmd_listen(opts).await?,
-            Opts::Connect(opts) => cmd_connect(opts).await?,
-        }
+    match opts {
+        Opts::Listen(opts) => cmd_listen(opts).await?,
+        Opts::Connect(opts) => cmd_connect(opts).await?,
+    }
 
-        Ok(())
-    })
+    Ok(())
 }

@@ -1,21 +1,19 @@
-use futures::prelude::*;
 use libc::{
     cfmakeraw, dup, ioctl, tcgetattr, tcsetattr, termios, winsize,
     STDIN_FILENO, STDOUT_FILENO, TCSANOW, TIOCGWINSZ,
 };
-use smol::Async;
 use std::fs::File;
-use std::io;
+use std::io::{self, Read, Write};
 use std::mem::MaybeUninit;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
-use std::pin::Pin;
-use std::task::{Context, Poll};
+use tokio::io::unix::AsyncFd;
 
 use crate::msgs::TermDimensions;
+use crate::utils::set_nonblock;
 
 pub struct RawTerm {
-    stdin: Async<File>,
-    stdout: Async<File>,
+    stdin: AsyncFd<File>,
+    stdout: AsyncFd<File>,
     saved_attrs: termios,
 }
 
@@ -27,7 +25,9 @@ impl RawTerm {
                 return Err(io::Error::last_os_error());
             }
 
-            Async::new(File::from_raw_fd(fd as RawFd))?
+            set_nonblock(&fd)?;
+
+            AsyncFd::new(File::from_raw_fd(fd as RawFd))?
         };
 
         let stdout = unsafe {
@@ -36,7 +36,9 @@ impl RawTerm {
                 return Err(io::Error::last_os_error());
             }
 
-            Async::new(File::from_raw_fd(fd as RawFd))?
+            set_nonblock(&fd)?;
+
+            AsyncFd::new(File::from_raw_fd(fd as RawFd))?
         };
 
         let saved_attrs = unsafe {
@@ -66,6 +68,39 @@ impl RawTerm {
         })
     }
 
+    pub async fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        loop {
+            let mut guard = self.stdin.readable_mut().await?;
+
+            match guard.try_io(|f| f.get_mut().read(buf)) {
+                Ok(result) => return result,
+                Err(_would_block) => continue,
+            }
+        }
+    }
+
+    pub async fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        loop {
+            let mut guard = self.stdout.writable_mut().await?;
+
+            match guard.try_io(|f| f.get_mut().write(buf)) {
+                Ok(result) => return result,
+                Err(_would_block) => continue,
+            }
+        }
+    }
+
+    pub async fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
+        let mut write_len = 0;
+
+        while write_len < buf.len() {
+            let len = self.write(&buf[write_len..]).await?;
+            write_len += len;
+        }
+
+        Ok(())
+    }
+
     pub fn dimensions(&self) -> io::Result<TermDimensions> {
         let winsz = unsafe {
             let mut winsz = MaybeUninit::<winsize>::uninit();
@@ -92,73 +127,5 @@ impl Drop for RawTerm {
             let _ =
                 tcsetattr(self.stdout.as_raw_fd(), TCSANOW, &self.saved_attrs);
         }
-    }
-}
-
-impl AsyncRead for RawTerm {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut Context,
-        buf: &mut [u8],
-    ) -> Poll<io::Result<usize>> {
-        Pin::new(&mut &self.stdin).poll_read(cx, buf)
-    }
-}
-
-impl AsyncWrite for RawTerm {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut Context,
-        buf: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        Pin::new(&mut &self.stdout).poll_write(cx, buf)
-    }
-
-    fn poll_flush(
-        self: Pin<&mut Self>,
-        cx: &mut Context,
-    ) -> Poll<io::Result<()>> {
-        Pin::new(&mut &self.stdout).poll_flush(cx)
-    }
-
-    fn poll_close(
-        self: Pin<&mut Self>,
-        cx: &mut Context,
-    ) -> Poll<io::Result<()>> {
-        Pin::new(&mut &self.stdout).poll_close(cx)
-    }
-}
-
-impl<'a> AsyncRead for &'a RawTerm {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut Context,
-        buf: &mut [u8],
-    ) -> Poll<io::Result<usize>> {
-        Pin::new(&mut &self.stdin).poll_read(cx, buf)
-    }
-}
-
-impl<'a> AsyncWrite for &'a RawTerm {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut Context,
-        buf: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        Pin::new(&mut &self.stdout).poll_write(cx, buf)
-    }
-
-    fn poll_flush(
-        self: Pin<&mut Self>,
-        cx: &mut Context,
-    ) -> Poll<io::Result<()>> {
-        Pin::new(&mut &self.stdout).poll_flush(cx)
-    }
-
-    fn poll_close(
-        self: Pin<&mut Self>,
-        cx: &mut Context,
-    ) -> Poll<io::Result<()>> {
-        Pin::new(&mut &self.stdout).poll_close(cx)
     }
 }

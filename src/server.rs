@@ -1,34 +1,32 @@
 use anyhow::{Context, Result};
-use futures::future::{Fuse, FusedFuture};
-use futures::prelude::*;
-use smol::{Async, Task};
-use std::cell::RefCell;
-use std::os::unix::net::{UnixListener, UnixStream};
+use bytes::{Buf, Bytes, BytesMut};
+use std::io;
+use std::mem;
 use std::path::Path;
-use std::pin::Pin;
-use std::process::Child;
-use std::rc::Rc;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{UnixListener, UnixStream};
+use tokio::process::Child;
 
 use crate::errors::*;
 use crate::msgs::*;
 use crate::pty;
 
 pub struct Server {
-    listener: Async<UnixListener>,
+    listener: UnixListener,
 }
 
 struct Handler {
-    client: Rc<Async<UnixStream>>,
-    master: Rc<pty::Master>,
+    client: UnixStream,
+    master: pty::Master,
     shell_process: Child,
 }
 
 impl Server {
-    pub fn bind(unix_sock_path: impl AsRef<Path>) -> Result<Self> {
+    pub async fn bind(unix_sock_path: impl AsRef<Path>) -> Result<Self> {
         let path = unix_sock_path.as_ref();
 
-        let _ = std::fs::remove_file(path);
-        let listener = Async::<UnixListener>::bind(path)?;
+        let _ = tokio::fs::remove_file(path).await;
+        let listener = UnixListener::bind(path)?;
 
         Ok(Server {
             listener,
@@ -36,22 +34,19 @@ impl Server {
     }
 
     pub async fn handle_incoming_clients(&self) {
-        let mut incoming = self.listener.incoming();
-
-        while let Some(Ok(client)) = incoming.next().await {
+        while let Ok((client, _)) = self.listener.accept().await {
             if let Ok((master, shell_process)) = pty::spawn_shell().await {
                 let handler = Handler {
-                    client: Rc::new(client),
-                    master: Rc::new(master),
+                    client,
+                    master,
                     shell_process,
                 };
 
-                Task::local(async move {
+                tokio::task::spawn(async move {
                     if let Err(e) = handler.handle_client().await {
                         println!("{:?}", e);
                     }
-                })
-                .detach();
+                });
             }
         }
     }
@@ -59,44 +54,16 @@ impl Server {
 
 impl Handler {
     async fn handle_client(mut self) -> Result<()> {
-        let client_buf = Rc::new(RefCell::new(Vec::new()));
-        let master_buf = Rc::new(RefCell::new([0u8; 1024]));
-
-        let mut client_read_fut = Fuse::terminated();
-        let mut master_read_fut = Fuse::terminated();
+        let mut client_buf = BytesMut::with_capacity(1024);
+        let mut master_buf = [0u8; 1024];
 
         loop {
-            if client_read_fut.is_terminated() {
-                let buf = client_buf.clone();
-                let client_dup = self.client.clone();
-
-                client_read_fut = read_lengthed_msg(client_dup, buf).fuse();
-            }
-
-            if master_read_fut.is_terminated() {
-                let buf = master_buf.clone();
-                let master_dup = self.master.clone();
-
-                master_read_fut = async move {
-                    let mut buf = buf.borrow_mut();
-                    (&*master_dup).read(&mut buf[..]).await
-                }
-                .fuse();
-            }
-
-            // Safety: This is safe because we do not move futures before
-            // their termination within or after the loop.
-            let mut client_read_fut =
-                unsafe { Pin::new_unchecked(&mut client_read_fut) };
-            let mut master_read_fut =
-                unsafe { Pin::new_unchecked(&mut master_read_fut) };
-
-            futures::select! {
+            tokio::select! {
                 // whatever we read from `client` we write it to `master`
-                res = client_read_fut => {
-                    res.context(HandleClientError::ClientToPtyFailed)?;
+                res = read_lengthed_msg(&mut self.client, &mut client_buf) => {
+                    let msg_bytes = res.context(HandleClientError::ClientToPtyFailed)?;
 
-                    if let Ok(msg) = bincode::deserialize(&client_buf.borrow()) {
+                    if let Ok(msg) = bincode::deserialize(&msg_bytes) {
                         self.handle_msg(msg)
                             .await
                             .context(HandleClientError::ClientToPtyFailed)?;
@@ -104,19 +71,22 @@ impl Handler {
                 }
 
                 // whatever we read from `master` we write it to `client`
-                res = master_read_fut => {
-                    let len =
-                        res.context(HandleClientError::PtyToClientFailed)?;
+                res = self.master.read(&mut master_buf[..]) => {
+                    let len = res?;
 
                     if len == 0 {
                         break;
                     }
 
-                    let data = &master_buf.borrow()[..len];
-                    (&*self.client)
-                        .write_all(data)
+                    self.client
+                        .write_all(&master_buf[..len])
                         .await
                         .context(HandleClientError::PtyToClientFailed)?;
+                }
+
+                Ok(_exit_status) = self.shell_process.wait() => {
+                    // TODO: Get exit status and forward it to client
+                    break;
                 }
             }
         }
@@ -126,7 +96,7 @@ impl Handler {
 
     async fn handle_msg(&mut self, msg: ServerMsg<'_>) -> Result<()> {
         match msg {
-            ServerMsg::Data(data) => (&*self.master).write_all(data).await?,
+            ServerMsg::Data(data) => self.master.write_all(data).await?,
             ServerMsg::SetDimensions(dim) => self.master.set_dimensions(dim)?,
         }
 
@@ -135,26 +105,28 @@ impl Handler {
 }
 
 async fn read_lengthed_msg(
-    stream: Rc<Async<UnixStream>>,
-    buf: Rc<RefCell<Vec<u8>>>,
-) -> std::io::Result<()> {
-    let mut msg_len_buf = [0u8; 4];
-    let mut buf = buf.borrow_mut();
+    stream: &mut UnixStream,
+    buf: &mut BytesMut,
+) -> io::Result<Bytes> {
+    loop {
+        if buf.len() >= mem::size_of::<u32>() {
+            let msg_len = (&buf[..]).get_u32() as usize;
+            let full_frame_len = mem::size_of::<u32>() + msg_len;
 
-    // read msg len
-    (&*stream).read_exact(&mut msg_len_buf).await?;
-    let msg_len = u32::from_be_bytes(msg_len_buf) as usize;
+            if buf.len() >= full_frame_len {
+                return Ok(buf
+                    .split_to(full_frame_len)
+                    .split_off(mem::size_of::<u32>())
+                    .freeze());
+            } else {
+                buf.reserve(full_frame_len - buf.len());
+            }
+        } else {
+            buf.reserve(mem::size_of::<u32>());
+        }
 
-    // read msg
-    buf.resize(msg_len, 0);
-    (&*stream).read_exact(&mut buf[..]).await?;
-
-    Ok(())
-}
-
-impl Drop for Handler {
-    fn drop(&mut self) {
-        let _ = self.shell_process.kill();
-        let _ = self.shell_process.wait();
+        if stream.read_buf(buf).await? == 0 {
+            return Err(io::ErrorKind::UnexpectedEof.into());
+        }
     }
 }
